@@ -9,7 +9,6 @@
 	--title-border: #c0392b;
 	--input-bg: #f4f2b0;
 	--player-input-bg: #e8eeff;
-	--divider-bg: #c9c9c9;
 	--singles: #a9c7e8;
 	--pairs: #f4b183;
 	--triples: #a9d18e;
@@ -34,25 +33,14 @@ body {
 	background: var(--page-bg);
 }
 
-/* ------------------------------------------------------------------ app bar */
+/* ------------------------------------------------------------------ scorer */
 
-.app-bar {
+.scorer {
 	display: flex;
-	flex-wrap: wrap;
-	gap: 0.75rem 1.5rem;
+	justify-content: flex-end;
 	align-items: center;
-	justify-content: space-between;
-	padding: 0.9rem 1.25rem;
-	background: #fff;
-	border-bottom: 2px solid var(--line);
-}
-
-.app-bar__title {
-	margin: 0;
-	font-size: 1.15rem;
-}
-
-.app-bar__scorer {
+	gap: 0.4rem;
+	padding: 0.9rem 1.25rem 0;
 	font-size: 0.95rem;
 }
 
@@ -77,6 +65,7 @@ body {
 .selectors {
 	display: flex;
 	flex-wrap: wrap;
+	justify-content: center;
 	gap: 1rem;
 	margin-bottom: 1rem;
 }
@@ -280,11 +269,6 @@ select:disabled {
 	text-align: left;
 }
 
-td.divider {
-	background: var(--divider-bg);
-	width: 8%;
-}
-
 .sheet-table td.section-gap,
 .player-table td.section-gap {
 	border-left: 0;
@@ -418,4 +402,11 @@ td.divider {
 .sheet-table input[type="number"] {
 	-moz-appearance: textfield;
 	appearance: textfield;
+}
+
+/* A number that breaks its competition's condition (e.g. an over-limit score). */
+.sheet-table td.cell input.is-invalid {
+	border-color: #c0392b;
+	background: #ffe3e0;
+	outline: 1px solid #c0392b;
 }

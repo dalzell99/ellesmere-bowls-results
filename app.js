@@ -35,12 +35,12 @@ const state = {
 	entries: [],        // filtered discipline entries, in original array order
 	numPlayers: 0,
 	loadedGame: null,   // baseline snapshot used for the same-fixture conflict check
+	baseline: null,     // sheet values as rendered/saved; edits are diffed against this
 	saveInFlight: false,
 	forceReload: false, // set after a same-fixture conflict; blocks re-saving
 };
 
 let autosaveTimer = null;
-let statusTimer = null;
 let noticeEl = null;
 
 const el = {
@@ -424,10 +424,12 @@ function hideSheet() {
 	state.entries = [];
 	state.numPlayers = 0;
 	state.loadedGame = null;
+	state.baseline = null;
 	state.forceReload = false;
 	clearAutosave();
 	clearNotice();
 	setStatus('', '');
+	el.saveButton.textContent = 'Save';
 }
 
 // ---------------------------------------------------------------------------
@@ -458,12 +460,15 @@ function renderSheet() {
 
 	// Baseline captured for the conflict check.
 	state.loadedGame = deepCopy(game);
+	// Snapshot what the sheet now shows, so later edits can be detected.
+	state.baseline = sheetSnapshot();
 
 	refreshDatalists(game.homeTeam, game.awayTeam);
 
 	el.sheet.hidden = false;
 	el.emptyState.hidden = true;
 	setStatus('', '');
+	el.saveButton.textContent = 'Save';
 
 	clearNotice();
 	showDraftBannerIfAny();
@@ -472,14 +477,13 @@ function renderSheet() {
 
 function buildDisciplineTable(game) {
 	const table = element('table', null, 'sheet-table');
-	table.appendChild(buildColgroup(['22%', '16%', '27%', '8%', '27%']));
+	table.appendChild(buildColgroup(['22%', '16%', '31%', '31%']));
 
 	const thead = document.createElement('thead');
 	const headRow = document.createElement('tr');
 	headRow.appendChild(element('th', '', 'team-head team-head--blank'));
 	headRow.appendChild(element('th', '', 'metrics-header team-head--blank'));
 	headRow.appendChild(element('th', String(game.homeTeam || ''), 'team-head'));
-	headRow.appendChild(element('th', '', 'team-head team-head--blank'));
 	headRow.appendChild(element('th', String(game.awayTeam || ''), 'team-head'));
 	thead.appendChild(headRow);
 	table.appendChild(thead);
@@ -515,14 +519,12 @@ function buildDisciplineTable(game) {
 			}
 			scoreRow.appendChild(element('td', 'Score', 'metric'));
 			scoreRow.appendChild(numberCell(item.index, 'homeScore', saved.homeScore));
-			scoreRow.appendChild(dividerCell());
 			scoreRow.appendChild(numberCell(item.index, 'awayScore', saved.awayScore));
 			tbody.appendChild(scoreRow);
 
 			const endsRow = document.createElement('tr');
 			endsRow.appendChild(element('td', 'Ends', 'metric'));
 			endsRow.appendChild(numberCell(item.index, 'homeEnds', saved.homeEnds));
-			endsRow.appendChild(dividerCell());
 			endsRow.appendChild(numberCell(item.index, 'awayEnds', saved.awayEnds));
 			tbody.appendChild(endsRow);
 		});
@@ -546,10 +548,6 @@ function numberCell(disciplineIndex, field, value) {
 	}
 	td.appendChild(input);
 	return td;
-}
-
-function dividerCell() {
-	return element('td', null, 'divider');
 }
 
 function buildPlayerTable(game) {
@@ -660,11 +658,109 @@ function collectTeamPlayers(team) {
 // Validation
 // ---------------------------------------------------------------------------
 
+/**
+ * Condition for a discipline in the current competition, or null when the
+ * discipline has none (in which case any value is valid). Returns { num, type }
+ * with type lowercased ("score" or "ends").
+ */
+function conditionFor(disciplineName) {
+	const competition = state.draw && state.draw[state.competitionIndex];
+	const conditions = competition && competition.conditions;
+	if (!conditions || typeof conditions !== 'object') {
+		return null;
+	}
+	const condition = conditions[disciplineName];
+	if (!condition || typeof condition !== 'object') {
+		return null;
+	}
+	const num = Number(condition.num);
+	if (!Number.isFinite(num)) {
+		return null;
+	}
+	return { num, type: String(condition.type || '').toLowerCase() };
+}
+
+/**
+ * Condition violations for one discipline's values, as { field, message } pairs.
+ * "score": each score is checked independently against the limit, and both sides
+ * may not sit on the limit together. "ends": the two ends are a game total and
+ * must not exceed the limit. An unknown type imposes no constraint.
+ */
+function conditionViolations(condition, values) {
+	const { num, type } = condition;
+	const violations = [];
+
+	if (type === 'score') {
+		for (const field of ['homeScore', 'awayScore']) {
+			if (values[field] > num) {
+				violations.push({ field, message: `Score can't exceed ${num}.` });
+			}
+		}
+		if (values.homeScore === num && values.awayScore === num) {
+			const message = `Both scores can't be ${num}.`;
+			for (const field of ['homeScore', 'awayScore']) {
+				if (!violations.some((violation) => violation.field === field)) {
+					violations.push({ field, message });
+				}
+			}
+		}
+		return violations;
+	}
+
+	if (type === 'ends' && values.homeEnds + values.awayEnds > num) {
+		const message = `Total ends can't exceed ${num}.`;
+		violations.push({ field: 'homeEnds', message });
+		violations.push({ field: 'awayEnds', message });
+	}
+
+	return violations;
+}
+
+/**
+ * A team's score can never be less than the number of ends it won, since each
+ * won end is worth at least one shot. Checked for both sides independently of
+ * any competition condition. Returns { field, message } pairs.
+ */
+function scoreEndsViolations(values) {
+	const violations = [];
+
+	for (const side of ['home', 'away']) {
+		const ends = values[`${side}Ends`];
+		if (values[`${side}Score`] < ends) {
+			const message = `Score can't be less than ends won (${ends}).`;
+			violations.push({ field: `${side}Score`, message });
+			violations.push({ field: `${side}Ends`, message });
+		}
+	}
+
+	return violations;
+}
+
+/** Toggle the invalid styling/message on every number input from a key->message map. */
+function applyNumberInvalidMarks(invalidMarks) {
+	for (const input of el.sheetBody.querySelectorAll('input[data-disc-idx]')) {
+		const key = `${input.dataset.discIdx}|${input.dataset.field}`;
+		const message = invalidMarks.get(key);
+		input.classList.toggle('is-invalid', message !== undefined);
+		if (message !== undefined) {
+			input.setAttribute('aria-invalid', 'true');
+			input.title = message;
+		} else {
+			input.removeAttribute('aria-invalid');
+			input.removeAttribute('title');
+		}
+	}
+}
+
 function validateSheet() {
 	let ok = true;
 
+	// "discIdx|field" -> message, for inputs that fail a condition or the score-vs-ends rule.
+	const invalidMarks = new Map();
+
 	const scores = state.entries.map((entry) => {
 		const result = { discipline: entry.name };
+		let allPresent = true;
 
 		for (const field of ['homeScore', 'awayScore', 'homeEnds', 'awayEnds']) {
 			const input = findInput(entry.index, field);
@@ -672,10 +768,24 @@ function validateSheet() {
 			result[field] = value;
 			if (value === null) {
 				ok = false;
+				allPresent = false;
+			}
+		}
+
+		if (allPresent) {
+			const condition = conditionFor(entry.name);
+			const violations = condition ? conditionViolations(condition, result) : [];
+			// Score-vs-ends is a universal rule, so it applies even with no condition.
+			violations.push(...scoreEndsViolations(result));
+			for (const violation of violations) {
+				ok = false;
+				invalidMarks.set(`${entry.index}|${violation.field}`, violation.message);
 			}
 		}
 		return result;
 	});
+
+	applyNumberInvalidMarks(invalidMarks);
 
 	const homePlayers = [];
 	const awayPlayers = [];
@@ -700,18 +810,24 @@ function updateSaveState() {
 }
 
 function onSheetInput() {
+	// Any edit invalidates the previous "Saved" state; the button returns to "Save".
+	el.saveButton.textContent = 'Save';
 	scheduleAutosave();
 	updateSaveState();
 }
 
-/** True when the current sheet holds edits that differ from the last saved game. */
+/** Current sheet values, in the same shape as a draft/save snapshot. */
+function sheetSnapshot() {
+	const { scores, homePlayers, awayPlayers } = validateSheet();
+	return { scores, homePlayers, awayPlayers };
+}
+
+/** True when the current sheet holds edits that differ from when it was rendered/saved. */
 function hasUnsavedChanges() {
-	if (el.sheet.hidden || !state.entries.length || !state.loadedGame || state.forceReload) {
+	if (el.sheet.hidden || !state.baseline || state.forceReload) {
 		return false;
 	}
-	const { scores, homePlayers, awayPlayers } = validateSheet();
-	const current = Object.assign({}, state.loadedGame, { scores, homePlayers, awayPlayers });
-	return !sameGame(current, state.loadedGame);
+	return !sameGame(sheetSnapshot(), state.baseline);
 }
 
 /** Ask the browser to confirm before a reload/close that would drop unsaved edits. */
@@ -724,18 +840,8 @@ function onBeforeUnload(event) {
 }
 
 function setStatus(text, variant) {
-	clearTimeout(statusTimer);
-	statusTimer = null;
 	el.saveStatus.textContent = text;
 	el.saveStatus.className = 'save-status' + (variant ? ` save-status--${variant}` : '');
-	// The success confirmation is transient: hide it shortly after it appears.
-	if (text === 'Saved') {
-		statusTimer = setTimeout(() => {
-			el.saveStatus.textContent = '';
-			el.saveStatus.className = 'save-status';
-			statusTimer = null;
-		}, 5000);
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +867,6 @@ async function onSave() {
 
 	state.saveInFlight = true;
 	updateSaveState();
-	setStatus('Saving\u2026', '');
 
 	try {
 		const res = await fetch(`${API}?action=save`, {
@@ -792,10 +897,13 @@ async function onSave() {
 		state.version = data.version;
 		state.draw[state.competitionIndex].rounds[state.roundIndex].games[state.gameIndex] = game;
 		state.loadedGame = deepCopy(game);
+		state.baseline = sheetSnapshot();
 		removeDraft(draftKey());
 		refreshDatalists(game.homeTeam, game.awayTeam);
 		clearNotice();
-		setStatus('Saved', 'ok');
+		// Confirm via the button itself; it stays "Saved" until the sheet is edited.
+		setStatus('', '');
+		el.saveButton.textContent = 'Saved';
 	} catch (err) {
 		setStatus(`Save failed: ${err.message}`, 'error');
 	} finally {
