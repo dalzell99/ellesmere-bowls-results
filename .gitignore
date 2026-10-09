@@ -2,3 +2,8 @@
 backups/*
 disputes/*
 !disputes/.gitkeep
+# Live SQLite database (draw.json stays tracked as the seed)
+draw.sqlite
+draw.sqlite-wal
+draw.sqlite-shm
+draw.sqlite-journal

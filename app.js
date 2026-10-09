@@ -3,7 +3,7 @@
 /*
  * Ellesmere Interclub Score Sheet — client logic.
  *
- * Flow: load draw.json from api.php -> pick competition, round, fixture -> render
+ * Flow: load the draw from api.php -> pick competition, round, fixture -> render
  * the sheet -> validate -> save the one game back through api.php. Unsaved inputs
  * are autosaved to localStorage as a per-fixture "draft" so a reload (including one
  * forced by a save conflict) never loses progress.
@@ -32,10 +32,11 @@ const DISPUTE_PROCESS_TIMEOUT_MS = 30000;  // give up if a photo never finishes 
 
 const state = {
 	draw: null,
-	version: null,
 	competitionIndex: -1,
 	roundIndex: -1,
 	gameIndex: -1,
+	gameId: null,        // database id of the selected fixture (from the draw)
+	gameRevision: null,  // per-game optimistic-lock revision at load time
 	entries: [],        // filtered discipline entries, in original array order
 	numPlayers: 0,
 	loadedGame: null,   // baseline snapshot used for the same-fixture conflict check
@@ -161,15 +162,6 @@ function sameGame(a, b) {
 	return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
-/** Safely read draw[ci].rounds[ri].games[gi] without throwing on a bad shape. */
-function gameAt(draw, ci, ri, gi) {
-	try {
-		return draw[ci].rounds[ri].games[gi];
-	} catch (err) {
-		return null;
-	}
-}
-
 /** Build a <colgroup> from an array of CSS widths. */
 function buildColgroup(widths) {
 	const colgroup = document.createElement('colgroup');
@@ -261,7 +253,7 @@ function openNameDialog() {
 }
 
 // ---------------------------------------------------------------------------
-// Load draw.json
+// Load draw data
 // ---------------------------------------------------------------------------
 
 async function loadDraw() {
@@ -272,13 +264,12 @@ async function loadDraw() {
 			throw new Error(data.error || `HTTP ${res.status}`);
 		}
 		state.draw = data.draw;
-		state.version = data.version;
 		populateCompetitionSelect();
 		applyUrlSelection();
 	} catch (err) {
 		showNotice({
 			variant: 'danger',
-			text: `Could not load draw.json: ${err.message}`,
+			text: `Could not load draw data: ${err.message}`,
 			actions: [{ label: 'Retry', onClick: () => location.reload() }],
 		});
 	}
@@ -454,6 +445,8 @@ function hideSheet() {
 	el.sheetBody.textContent = '';
 	state.entries = [];
 	state.numPlayers = 0;
+	state.gameId = null;
+	state.gameRevision = null;
 	state.loadedGame = null;
 	state.baseline = null;
 	state.forceReload = false;
@@ -481,6 +474,10 @@ function renderSheet() {
 		.map((name, index) => ({ name: String(name).toLowerCase(), index }))
 		.filter((entry) => KNOWN_DISCIPLINES.includes(entry.name));
 	state.numPlayers = normalisePlayerCount(competition.numPlayers);
+
+	// Capture the database identity so a save can target this exact fixture.
+	state.gameId = Number.isInteger(game.id) ? game.id : null;
+	state.gameRevision = Number.isInteger(game.revision) ? game.revision : null;
 
 	state.forceReload = false;
 
@@ -805,7 +802,9 @@ function validateSheet() {
 	const invalidMarks = new Map();
 
 	const scores = state.entries.map((entry) => {
-		const result = { discipline: entry.name };
+		// position is the original discipline index, so the server can keep scores
+		// aligned with the competition's discipline array even if names repeat.
+		const result = { position: entry.index, discipline: entry.name };
 		let allPresent = true;
 
 		for (const field of ['homeScore', 'awayScore', 'homeEnds', 'awayEnds']) {
@@ -852,7 +851,9 @@ function validateSheet() {
 
 function updateSaveState() {
 	const { ok } = validateSheet();
-	el.saveButton.disabled = !ok || state.saveInFlight || state.forceReload;
+	// A missing gameId means the fixture is gone from the draw (e.g. it reloaded
+	// after an insert/delete); block the save until the sheet is re-rendered.
+	el.saveButton.disabled = !ok || state.saveInFlight || state.forceReload || state.gameId === null;
 }
 
 function onSheetInput() {
@@ -895,7 +896,7 @@ function setStatus(text, variant) {
 // ---------------------------------------------------------------------------
 
 async function onSave() {
-	if (state.saveInFlight || state.forceReload) {
+	if (state.saveInFlight || state.forceReload || state.gameId === null) {
 		return;
 	}
 	const { ok, scores, homePlayers, awayPlayers } = validateSheet();
@@ -920,11 +921,9 @@ async function onSave() {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				version: state.version,
+				gameId: state.gameId,
+				revision: state.gameRevision,
 				userName: getScorerName(),
-				competitionIndex: state.competitionIndex,
-				roundIndex: state.roundIndex,
-				gameIndex: state.gameIndex,
 				game,
 			}),
 		});
@@ -932,7 +931,7 @@ async function onSave() {
 		const data = await res.json();
 
 		if (res.status === 409) {
-			handleConflict(data);
+			handleConflict();
 			return;
 		}
 		if (!res.ok || !data.success) {
@@ -940,8 +939,11 @@ async function onSave() {
 			return;
 		}
 
-		// Success: adopt the new version, update the in-memory copy, drop the draft.
-		state.version = data.version;
+		// Success: adopt the new revision, update the in-memory copy, drop the draft.
+		if (Number.isInteger(data.revision)) {
+			state.gameRevision = data.revision;
+		}
+		game.revision = state.gameRevision;
 		state.draw[state.competitionIndex].rounds[state.roundIndex].games[state.gameIndex] = game;
 		state.loadedGame = deepCopy(game);
 		state.baseline = sheetSnapshot();
@@ -960,42 +962,24 @@ async function onSave() {
 	}
 }
 
-function handleConflict(data) {
-	const { competitionIndex: ci, roundIndex: ri, gameIndex: gi } = state;
-	const serverGame = gameAt(data.draw || [], ci, ri, gi);
-
-	// Make sure the user's current entries are stored before anything else.
-	writeDraft();
-
-	if (serverGame && !sameGame(serverGame, state.loadedGame)) {
-		// Same fixture was changed by someone else: their result wins.
-		removeDraft(draftKey());
-		state.forceReload = true;
-		setStatus('Someone else saved this fixture.', 'error');
-		showNotice({
-			variant: 'danger',
-			text: 'Someone else saved this fixture. Reload to see their result.',
-			actions: [{ label: 'Reload', onClick: resync }],
-		});
-		updateSaveState();
-		updateDisputeButtons();
-		return;
-	}
-
-	// A different fixture changed: keep the user's entries and let them re-save.
-	state.draw = data.draw;
-	state.version = data.version;
-	setStatus('Your entries were kept.', '');
+/**
+ * A per-game lock means a 409 is always *this* fixture: someone else saved it
+ * first, so their result wins. Drop our draft and offer a reload.
+ */
+function handleConflict() {
+	removeDraft(draftKey());
+	state.forceReload = true;
+	setStatus('Someone else saved this fixture.', 'error');
 	showNotice({
-		text: 'Someone else saved another fixture. Your unsaved entries have been kept \u2014 you can save again.',
-		actions: [
-			{ label: 'Reload latest', onClick: resync },
-			{ label: 'Discard mine', onClick: () => { removeDraft(draftKey()); resync(); } },
-		],
+		variant: 'danger',
+		text: 'Someone else saved this fixture. Reload to see their result.',
+		actions: [{ label: 'Reload', onClick: resync }],
 	});
+	updateSaveState();
+	updateDisputeButtons();
 }
 
-/** Re-fetch draw.json and re-render the current fixture with the latest values. */
+/** Re-fetch the draw and re-render the current fixture with the latest values. */
 async function resync() {
 	try {
 		const res = await fetch(`${API}?action=load`, { headers: { Accept: 'application/json' } });
@@ -1004,7 +988,6 @@ async function resync() {
 			throw new Error(data.error || `HTTP ${res.status}`);
 		}
 		state.draw = data.draw;
-		state.version = data.version;
 		clearNotice();
 
 		if (state.competitionIndex >= 0 && state.roundIndex >= 0 && state.gameIndex >= 0) {
@@ -1050,7 +1033,7 @@ function writeDraft() {
 	const { scores, homePlayers, awayPlayers } = validateSheet();
 	const draft = {
 		savedAt: Date.now(),
-		baseVersion: state.version,
+		baseVersion: state.gameRevision,
 		scores,
 		homePlayers,
 		awayPlayers,
@@ -1424,9 +1407,7 @@ async function onSubmitDispute() {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				competitionIndex: state.competitionIndex,
-				roundIndex: state.roundIndex,
-				gameIndex: state.gameIndex,
+				gameId: state.gameId,
 				discipline: state.disputeDisciplineName,
 				userName: getScorerName(),
 				image: disputeImage,
@@ -1442,7 +1423,7 @@ async function onSubmitDispute() {
 			return;
 		}
 
-		// Success: confirm the save. draw.json, its version and the drafts are
+		// Success: confirm the save. The draw, its revisions and the drafts are
 		// deliberately untouched, so no conflict/reload flow is involved.
 		disputeImage = null;
 		showDisputeSuccess();
