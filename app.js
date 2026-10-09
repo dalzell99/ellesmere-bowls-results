@@ -25,6 +25,10 @@ const ROUND_PARAM = 'round';
 const FIXTURE_PARAM = 'fixture';
 const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // keep drafts for ~7 days
 const AUTOSAVE_MS = 500;
+const DISPUTE_MAX_EDGE = 1600; // longest edge of the uploaded photo, in px
+const DISPUTE_QUALITY = 0.8;   // JPEG quality for the re-encoded photo
+const DISPUTE_HEADER_BYTES = 256 * 1024;   // header slice read to find the photo's pixel size
+const DISPUTE_PROCESS_TIMEOUT_MS = 30000;  // give up if a photo never finishes decoding
 
 const state = {
 	draw: null,
@@ -38,10 +42,14 @@ const state = {
 	baseline: null,     // sheet values as rendered/saved; edits are diffed against this
 	saveInFlight: false,
 	forceReload: false, // set after a same-fixture conflict; blocks re-saving
+	disputeDisciplineName: '', // discipline name recorded with the next dispute
 };
 
 let autosaveTimer = null;
 let noticeEl = null;
+let disputeImage = null; // processed JPEG data URL awaiting submit, or null
+let disputeBusy = false; // true while a photo is being compressed or uploaded
+let disputeGeneration = 0; // bumped on reset so stale async results are discarded
 
 const el = {
 	scorerNameDisplay: document.getElementById('scorerNameDisplay'),
@@ -60,6 +68,17 @@ const el = {
 	nameDialog: document.getElementById('nameDialog'),
 	nameForm: document.getElementById('nameForm'),
 	nameInput: document.getElementById('nameInput'),
+	disputeDialog: document.getElementById('disputeDialog'),
+	disputeSummary: document.getElementById('disputeSummary'),
+	disputeUploadButton: document.getElementById('disputeUploadButton'),
+	disputeUploadInput: document.getElementById('disputeUploadInput'),
+	disputeCameraButton: document.getElementById('disputeCameraButton'),
+	disputeCameraInput: document.getElementById('disputeCameraInput'),
+	disputePreview: document.getElementById('disputePreview'),
+	disputePreviewImg: document.getElementById('disputePreviewImg'),
+	disputeStatus: document.getElementById('disputeStatus'),
+	disputeSubmitButton: document.getElementById('disputeSubmitButton'),
+	disputeCloseButton: document.getElementById('disputeCloseButton'),
 };
 
 // ---------------------------------------------------------------------------
@@ -194,9 +213,21 @@ function bindStaticEvents() {
 	el.fixtureSelect.addEventListener('change', () => { onFixtureChange(); syncUrlParams(); });
 	el.saveButton.addEventListener('click', onSave);
 
+	// Dispute dialog: the visible buttons trigger the hidden file inputs; both
+	// inputs share one handler, and neither touches the draw or its drafts.
+	el.disputeUploadButton.addEventListener('click', () => el.disputeUploadInput.click());
+	el.disputeCameraButton.addEventListener('click', () => el.disputeCameraInput.click());
+	el.disputeUploadInput.addEventListener('change', onDisputeFileChosen);
+	el.disputeCameraInput.addEventListener('change', onDisputeFileChosen);
+	el.disputeSubmitButton.addEventListener('click', onSubmitDispute);
+	el.disputeCloseButton.addEventListener('click', closeDisputeDialog);
+	el.disputeDialog.addEventListener('close', resetDisputeDialog);
+
 	// Any edit in the sheet re-validates and (debounced) autosaves a draft.
 	el.sheetBody.addEventListener('input', onSheetInput);
 	el.sheetBody.addEventListener('change', onSheetInput);
+	// The per-discipline Dispute buttons are rebuilt with the sheet, so delegate.
+	el.sheetBody.addEventListener('click', onSheetBodyClick);
 
 	// Warn before reloading/closing with unsaved changes rather than silently
 	// writing a draft (which would resurrect a discarded draft on every reload).
@@ -430,6 +461,8 @@ function hideSheet() {
 	clearNotice();
 	setStatus('', '');
 	el.saveButton.textContent = 'Save';
+	resetDisputeDialog();
+	updateDisputeButtons();
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +506,8 @@ function renderSheet() {
 	clearNotice();
 	showDraftBannerIfAny();
 	updateSaveState();
+	resetDisputeDialog();
+	updateDisputeButtons();
 }
 
 function buildDisciplineTable(game) {
@@ -513,8 +548,19 @@ function buildDisciplineTable(game) {
 			const scoreRow = document.createElement('tr');
 			if (position === 0) {
 				const discClass = DISCIPLINE_CLASS[group.name] || 'disc--unknown';
-				const discCell = element('th', capitalise(group.name), `disc ${discClass}`);
+				const discCell = element('th', null, `disc ${discClass}`);
 				discCell.rowSpan = rowspan;
+				// The name and its Dispute button are stacked and centred together.
+				const discInner = element('div', null, 'disc__inner');
+				discInner.appendChild(element('span', capitalise(group.name), 'disc__name'));
+				const disputeButton = element('button', 'Dispute', 'disc-dispute-button');
+				disputeButton.type = 'button';
+				disputeButton.dataset.discIdx = String(item.index);
+				disputeButton.dataset.discipline = group.name;
+				disputeButton.setAttribute('aria-label', `Dispute ${capitalise(group.name)} result`);
+				disputeButton.hidden = true; // revealed by updateDisputeButtons()
+				discInner.appendChild(disputeButton);
+				discCell.appendChild(discInner);
 				scoreRow.appendChild(discCell);
 			}
 			scoreRow.appendChild(element('td', 'Score', 'metric'));
@@ -867,6 +913,7 @@ async function onSave() {
 
 	state.saveInFlight = true;
 	updateSaveState();
+	updateDisputeButtons();
 
 	try {
 		const res = await fetch(`${API}?action=save`, {
@@ -909,6 +956,7 @@ async function onSave() {
 	} finally {
 		state.saveInFlight = false;
 		updateSaveState();
+		updateDisputeButtons();
 	}
 }
 
@@ -930,6 +978,7 @@ function handleConflict(data) {
 			actions: [{ label: 'Reload', onClick: resync }],
 		});
 		updateSaveState();
+		updateDisputeButtons();
 		return;
 	}
 
@@ -1165,5 +1214,475 @@ function clearNotice() {
 	if (noticeEl) {
 		noticeEl.remove();
 		noticeEl = null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dispute (upload a scorecard photo for a saved result)
+// ---------------------------------------------------------------------------
+
+/** True when a single score entry has at least one saved score/ends value. */
+function scoreEntryHasResults(entry) {
+	if (!entry) {
+		return false;
+	}
+	const fields = ['homeScore', 'awayScore', 'homeEnds', 'awayEnds'];
+	return fields.some((field) => entry[field] !== null && entry[field] !== undefined && entry[field] !== '');
+}
+
+/** True when the given discipline has at least one saved score/ends value. */
+function disciplineHasResults(disciplineIndex) {
+	const scores = state.loadedGame && Array.isArray(state.loadedGame.scores)
+		? state.loadedGame.scores
+		: [];
+	return scoreEntryHasResults(scores[disciplineIndex]);
+}
+
+/**
+ * Show a Dispute button inside every discipline cell that already has saved
+ * results, and enable it only when the sheet is idle enough to dispute.
+ */
+function updateDisputeButtons() {
+	const ready = Boolean(state.baseline) && !state.forceReload && !state.saveInFlight;
+	for (const button of el.sheetBody.querySelectorAll('.disc-dispute-button')) {
+		const discIdx = Number(button.dataset.discIdx);
+		const hasResults = disciplineHasResults(discIdx);
+		button.hidden = !hasResults;
+		button.disabled = !hasResults || !ready;
+	}
+}
+
+/** Open the dispute dialog for whichever discipline button was clicked. */
+function onSheetBodyClick(event) {
+	const button = event.target instanceof Element
+		? event.target.closest('.disc-dispute-button')
+		: null;
+	if (!button || button.hidden || button.disabled) {
+		return;
+	}
+	openDisputeDialog(Number(button.dataset.discIdx), button.dataset.discipline || '');
+}
+
+function openDisputeDialog(disciplineIndex, disciplineName) {
+	if (!state.baseline || !disciplineHasResults(disciplineIndex)) {
+		return;
+	}
+	const game = state.loadedGame;
+	const competition = state.draw[state.competitionIndex];
+	const round = competition.rounds[state.roundIndex];
+	const roundNumber = Number.isFinite(Number(round.round)) ? round.round : state.roundIndex + 1;
+	const disciplineLabel = capitalise(disciplineName);
+	el.disputeSummary.textContent =
+		`${competition.competition} \u00b7 Round ${roundNumber} \u00b7 ${game.homeTeam || '?'} vs ${game.awayTeam || '?'} \u00b7 ${disciplineLabel}`;
+
+	resetDisputeDialog();
+
+	// Remember which game (discipline) this dispute belongs to; it is sent on
+	// submit so the stored photo can be filed against that game.
+	state.disputeDisciplineName = disciplineName;
+
+	// Only offer the camera where one exists (a phone/tablet coarse pointer).
+	const coarsePointer = typeof window.matchMedia === 'function'
+		&& window.matchMedia('(pointer: coarse)').matches;
+	el.disputeCameraButton.hidden = !coarsePointer;
+
+	if (typeof el.disputeDialog.showModal === 'function') {
+		el.disputeDialog.showModal();
+	} else {
+		el.disputeDialog.setAttribute('open', '');
+	}
+	el.disputeUploadButton.focus();
+}
+
+/** Clear the photo, preview and status left from a previous dispute attempt. */
+function resetDisputeDialog() {
+	// Invalidate any in-flight compress/upload so a late continuation cannot apply
+	// its photo to the freshly reset dialog; the operation clears disputeBusy itself.
+	disputeGeneration += 1;
+	disputeImage = null;
+	el.disputeUploadInput.value = '';
+	el.disputeCameraInput.value = '';
+	el.disputePreview.hidden = true;
+	el.disputePreviewImg.onload = null;
+	el.disputePreviewImg.onerror = null;
+	el.disputePreviewImg.removeAttribute('src');
+	el.disputeUploadButton.hidden = false;
+	el.disputeCameraButton.hidden = false;
+	el.disputeSubmitButton.hidden = false;
+	el.disputeSubmitButton.textContent = 'Submit dispute';
+	el.disputeSubmitButton.disabled = true;
+	el.disputeCloseButton.textContent = 'Cancel';
+	el.disputeCloseButton.disabled = false;
+	el.disputeUploadButton.disabled = false;
+	el.disputeCameraButton.disabled = false;
+	setDisputeStatus('', '');
+}
+
+/** Drop any processed photo and hide its preview (used when a choice is rejected). */
+function clearDisputeSelection() {
+	disputeImage = null;
+	el.disputePreview.hidden = true;
+	el.disputePreviewImg.onload = null;
+	el.disputePreviewImg.onerror = null;
+	el.disputePreviewImg.removeAttribute('src');
+	setDisputeControlsDisabled(false);
+}
+
+function closeDisputeDialog() {
+	if (typeof el.disputeDialog.close === 'function') {
+		el.disputeDialog.close();
+	} else {
+		el.disputeDialog.removeAttribute('open');
+	}
+}
+
+function setDisputeStatus(text, variant) {
+	el.disputeStatus.textContent = text;
+	el.disputeStatus.className = 'save-status' + (variant ? ` save-status--${variant}` : '');
+}
+
+function setDisputeControlsDisabled(disabled) {
+	el.disputeUploadButton.disabled = disabled;
+	el.disputeCameraButton.disabled = disabled;
+	el.disputeCloseButton.disabled = disabled;
+	el.disputeSubmitButton.disabled = disabled || !disputeImage;
+}
+
+/** Shared handler for both file inputs: compress the chosen photo for preview. */
+async function onDisputeFileChosen(event) {
+	if (disputeBusy) {
+		return;
+	}
+	const input = event.target;
+	const file = input.files && input.files[0];
+	// Clear the input so picking the same file again still fires "change".
+	input.value = '';
+	if (!file) {
+		return;
+	}
+	if (!file.type || file.type.indexOf('image/') !== 0) {
+		clearDisputeSelection();
+		setDisputeStatus('Please choose an image file.', 'error');
+		return;
+	}
+
+	disputeBusy = true;
+	const generation = disputeGeneration;
+	setDisputeControlsDisabled(true);
+	setDisputeStatus('Processing photo\u2026', '');
+
+	try {
+		const dataUrl = await withTimeout(
+			compressImage(file),
+			DISPUTE_PROCESS_TIMEOUT_MS,
+			'image processing timed out'
+		);
+		if (generation !== disputeGeneration) {
+			return; // dialog was reset or closed while decoding; discard the result
+		}
+		disputeImage = dataUrl;
+		// Reveal the preview only after the image itself has decoded, so an
+		// empty or broken frame is never shown.
+		el.disputePreviewImg.onload = () => {
+			el.disputePreviewImg.onload = null;
+			el.disputePreview.hidden = false;
+		};
+		el.disputePreviewImg.onerror = () => {
+			el.disputePreviewImg.onerror = null;
+			el.disputePreview.hidden = true;
+		};
+		el.disputePreviewImg.src = dataUrl;
+		if (el.disputePreviewImg.complete && el.disputePreviewImg.naturalWidth > 0) {
+			el.disputePreview.hidden = false;
+		}
+		setDisputeStatus('', '');
+	} catch (err) {
+		if (generation !== disputeGeneration) {
+			return;
+		}
+		clearDisputeSelection();
+		setDisputeStatus("Couldn't read that image \u2014 try JPEG or PNG.", 'error');
+	} finally {
+		disputeBusy = false;
+		if (generation === disputeGeneration) {
+			setDisputeControlsDisabled(false);
+		}
+	}
+}
+
+async function onSubmitDispute() {
+	if (disputeBusy || !disputeImage) {
+		return;
+	}
+	disputeBusy = true;
+	const generation = disputeGeneration;
+	setDisputeControlsDisabled(true);
+	setDisputeStatus('Uploading\u2026', '');
+
+	try {
+		const res = await fetch(`${API}?action=dispute`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				competitionIndex: state.competitionIndex,
+				roundIndex: state.roundIndex,
+				gameIndex: state.gameIndex,
+				discipline: state.disputeDisciplineName,
+				userName: getScorerName(),
+				image: disputeImage,
+			}),
+		});
+
+		const data = await res.json();
+		if (generation !== disputeGeneration) {
+			return; // dialog was reset or closed while uploading; discard the result
+		}
+		if (!res.ok || !data.success) {
+			setDisputeStatus(`Dispute failed: ${data.error || res.status}`, 'error');
+			return;
+		}
+
+		// Success: confirm the save. draw.json, its version and the drafts are
+		// deliberately untouched, so no conflict/reload flow is involved.
+		disputeImage = null;
+		showDisputeSuccess();
+	} catch (err) {
+		if (generation !== disputeGeneration) {
+			return;
+		}
+		setDisputeStatus(`Dispute failed: ${err.message}`, 'error');
+	} finally {
+		disputeBusy = false;
+		if (generation === disputeGeneration) {
+			setDisputeControlsDisabled(false);
+		}
+	}
+}
+
+/** Switch the dialog to a finished state confirming the photo was saved. */
+function showDisputeSuccess() {
+	el.disputePreview.hidden = true;
+	el.disputeUploadButton.hidden = true;
+	el.disputeCameraButton.hidden = true;
+	el.disputeSubmitButton.hidden = true;
+	el.disputeCloseButton.textContent = 'Close';
+	setDisputeStatus('Dispute saved.', 'ok');
+}
+
+/**
+ * Decode a File for canvas drawing. Prefers createImageBitmap with EXIF
+ * orientation so phone photos are not saved sideways; falls back to an <img>
+ * element (modern browsers auto-orient it when drawn) and revokes the object URL.
+ */
+async function decodeImage(file) {
+	if (typeof createImageBitmap === 'function') {
+		try {
+			const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+			return {
+				image: bitmap,
+				width: bitmap.width,
+				height: bitmap.height,
+				release: () => bitmap.close(),
+			};
+		} catch (err) {
+			/* fall through to the <img> path */
+		}
+	}
+
+	const url = URL.createObjectURL(file);
+	try {
+		const img = await loadImage(url);
+		return {
+			image: img,
+			width: img.naturalWidth || img.width,
+			height: img.naturalHeight || img.height,
+			release: () => URL.revokeObjectURL(url),
+		};
+	} catch (err) {
+		URL.revokeObjectURL(url);
+		throw err;
+	}
+}
+
+function loadImage(url) {
+	return new Promise((resolve, reject) => {
+		const img = new Image();
+		img.onload = () => resolve(img);
+		img.onerror = () => reject(new Error('image decode failed'));
+		img.src = url;
+	});
+}
+
+/**
+ * Compress a chosen photo to a JPEG data URL: downscale so the longest edge is at
+ * most DISPUTE_MAX_EDGE (never upscaling), then re-encode. Targets roughly
+ * 200-600 KB, well under PHP's default post_max_size (8M); raise the limits only
+ * if larger photos are ever needed.
+ */
+async function compressImage(file) {
+	// Read the pixel size from the file header first so the browser can be asked
+	// to decode straight to the target size. Decoding a phone photo at full
+	// resolution (a 50 MP shot is ~200 MB once decoded) can exhaust a mobile
+	// tab's memory and reload the page, losing the dialog with no error shown.
+	const dimensions = await readImageDimensions(file);
+	if (!dimensions) {
+		// Without a readable size we cannot guarantee a bounded decode, so decline
+		// rather than risk materialising an enormous bitmap at full resolution.
+		throw new Error('unmeasurable image');
+	}
+
+	if (Math.max(dimensions.width, dimensions.height) > DISPUTE_MAX_EDGE) {
+		const bitmap = await decodeDownscaled(file, dimensions);
+		try {
+			const fitted = fitWithin(bitmap.width, bitmap.height, DISPUTE_MAX_EDGE);
+			return drawToJpeg(bitmap, fitted.width, fitted.height);
+		} finally {
+			bitmap.close();
+		}
+	}
+
+	const source = await decodeImage(file);
+	try {
+		const fitted = fitWithin(source.width, source.height, DISPUTE_MAX_EDGE);
+		return drawToJpeg(source.image, fitted.width, fitted.height);
+	} finally {
+		if (typeof source.release === 'function') {
+			source.release();
+		}
+	}
+}
+
+/**
+ * Read an image's pixel dimensions from its file header without decoding it.
+ * Supports JPEG (Start-Of-Frame) and PNG (IHDR); anything else returns null so
+ * the caller falls back to a normal decode. The size is the raw (un-oriented)
+ * one, which is all that is needed to choose a resize target.
+ */
+async function readImageDimensions(file) {
+	const bytes = new Uint8Array(await file.slice(0, DISPUTE_HEADER_BYTES).arrayBuffer());
+	if (bytes.length < 24) {
+		return null;
+	}
+	// PNG signature, then width/height in the IHDR chunk at bytes 16 and 20.
+	if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+		const width = readUint32BE(bytes, 16);
+		const height = readUint32BE(bytes, 20);
+		return width && height ? { width, height } : null;
+	}
+	// JPEG: walk the marker segments up to the Start-Of-Frame.
+	if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+		return readJpegDimensions(bytes);
+	}
+	return null;
+}
+
+function readUint32BE(bytes, offset) {
+	return ((bytes[offset] << 24) | (bytes[offset + 1] << 16)
+		| (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+}
+
+function readJpegDimensions(bytes) {
+	let offset = 2; // skip the SOI marker
+	while (offset + 9 < bytes.length) {
+		if (bytes[offset] !== 0xff) {
+			offset += 1; // resynchronise on the next marker
+			continue;
+		}
+		const marker = bytes[offset + 1];
+		offset += 2;
+		// Markers that carry no length payload.
+		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+			continue;
+		}
+		const length = (bytes[offset] << 8) | bytes[offset + 1];
+		if (length < 2) {
+			break;
+		}
+		const isSOF = (marker >= 0xc0 && marker <= 0xc3)
+			|| (marker >= 0xc5 && marker <= 0xc7)
+			|| (marker >= 0xc9 && marker <= 0xcb)
+			|| (marker >= 0xcd && marker <= 0xcf);
+		if (isSOF) {
+			const height = (bytes[offset + 3] << 8) | bytes[offset + 4];
+			const width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+			return width && height ? { width, height } : null;
+		}
+		offset += length;
+	}
+	return null;
+}
+
+/**
+ * Ask the browser to decode the file at a reduced size. resizeWidth/-Height
+ * preserve the aspect ratio but force the given dimension, so cap the longer
+ * side reported by the header; the caller then trims any remaining excess.
+ * imageOrientation keeps EXIF-rotated phone photos upright.
+ */
+function decodeDownscaled(file, dimensions) {
+	const options = { imageOrientation: 'from-image', resizeQuality: 'high' };
+	if (dimensions.width >= dimensions.height) {
+		options.resizeWidth = DISPUTE_MAX_EDGE;
+	} else {
+		options.resizeHeight = DISPUTE_MAX_EDGE;
+	}
+	return createImageBitmap(file, options);
+}
+
+/** Scale a size down so its longest edge is at most maxEdge; never upscales. */
+function fitWithin(width, height, maxEdge) {
+	const longest = Math.max(width, height);
+	if (longest <= maxEdge) {
+		return { width: Math.max(1, width), height: Math.max(1, height) };
+	}
+	const scale = maxEdge / longest;
+	return {
+		width: Math.max(1, Math.round(width * scale)),
+		height: Math.max(1, Math.round(height * scale)),
+	};
+}
+
+/** Draw a decoded image at the given size to a JPEG data URL. */
+function drawToJpeg(image, width, height) {
+	const canvas = document.createElement('canvas');
+	canvas.width = width;
+	canvas.height = height;
+	const ctx = canvas.getContext('2d');
+	if (!ctx) {
+		throw new Error('canvas unsupported');
+	}
+	ctx.drawImage(image, 0, 0, width, height);
+	return canvasToJpegDataUrl(canvas);
+}
+
+/** Reject if a promise does not settle in time, so a stalled decode cannot wedge the dialog. */
+function withTimeout(promise, ms, message) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error(message)), ms);
+		promise.then(
+			(value) => { clearTimeout(timer); resolve(value); },
+			(error) => { clearTimeout(timer); reject(error); }
+		);
+	});
+}
+
+function canvasToJpegDataUrl(canvas) {
+	if (typeof canvas.toBlob === 'function') {
+		return new Promise((resolve, reject) => {
+			canvas.toBlob((blob) => {
+				if (!blob) {
+					reject(new Error('encode failed'));
+					return;
+				}
+				const reader = new FileReader();
+				reader.onload = () => resolve(String(reader.result));
+				reader.onerror = () => reject(new Error('encode failed'));
+				reader.readAsDataURL(blob);
+			}, 'image/jpeg', DISPUTE_QUALITY);
+		});
+	}
+	try {
+		return Promise.resolve(canvas.toDataURL('image/jpeg', DISPUTE_QUALITY));
+	} catch (err) {
+		return Promise.reject(err);
 	}
 }

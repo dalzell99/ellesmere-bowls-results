@@ -1,10 +1,23 @@
+<?php
+/**
+ * Cache-busting: stamp each asset URL with the file's last-modified time so a
+ * new deploy is never served from a mobile browser's cached copy. Falls back to
+ * the current time if the file cannot be stat-ed.
+ */
+function asset_url(string $file): string
+{
+	$path = __DIR__ . '/' . $file;
+	$version = @filemtime($path) ?: time();
+	return $file . '?v=' . $version;
+}
+?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8" />
-	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 	<title>Ellesmere Interclub Score Sheet</title>
-	<link rel="stylesheet" href="styles.css" />
+	<link rel="stylesheet" href="<?= asset_url('styles.css') ?>" />
 </head>
 <body>
 	<div class="scorer">
@@ -80,6 +93,31 @@
 		</form>
 	</dialog>
 
-	<script src="app.js"></script>
+	<!-- Dispute a saved result: attach or (on mobile) capture a scorecard photo. -->
+	<dialog id="disputeDialog" class="dialog">
+		<div id="disputeForm" class="dialog__form">
+			<h2 class="dialog__title">Dispute this result</h2>
+			<p id="disputeSummary" class="dispute-summary"></p>
+			<p class="dialog__hint">
+				Attach a photo of the signed scorecard. It is uploaded to the club server for review.
+			</p>
+			<div class="dispute-capture">
+				<button type="button" id="disputeUploadButton" class="secondary-button">Upload photo</button>
+				<button type="button" id="disputeCameraButton" class="secondary-button" hidden>Take photo</button>
+				<input type="file" id="disputeUploadInput" accept="image/*" hidden aria-label="Upload a scorecard photo" />
+				<input type="file" id="disputeCameraInput" accept="image/*" capture="environment" hidden aria-label="Take a scorecard photo with the camera" />
+			</div>
+			<div id="disputePreview" class="dispute-preview" hidden>
+				<img id="disputePreviewImg" alt="Selected scorecard photo preview" />
+			</div>
+			<p id="disputeStatus" class="save-status" role="status"></p>
+			<div class="dialog__actions">
+				<button type="button" id="disputeSubmitButton" class="primary-button" disabled>Submit dispute</button>
+				<button type="button" id="disputeCloseButton" class="secondary-button">Cancel</button>
+			</div>
+		</div>
+	</dialog>
+
+	<script src="<?= asset_url('app.js') ?>"></script>
 </body>
 </html>

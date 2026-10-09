@@ -5,19 +5,25 @@ declare(strict_types=1);
  * Rooster Cup Score Sheet — API endpoint.
  *
  * Actions:
- *   GET  api.php?action=load  -> { success, version, draw }
- *   POST api.php?action=save  -> { success, version, backup } or an error
+ *   GET  api.php?action=load     -> { success, version, draw }
+ *   POST api.php?action=save     -> { success, version, backup } or an error
+ *   POST api.php?action=dispute  -> { success, file } or an error
  *
  * Save is a targeted update of one game inside draw.json, guarded by an exclusive
  * lock and an md5 "version" conflict check. The file is replaced atomically (temp
  * file + rename) and a post-save backup copy is written to backups/. The lock uses
  * a separate lock file because Windows cannot replace a file that is held open.
  *
+ * Dispute writes a compressed scorecard photo into disputes/, named from the
+ * server clock and the game details taken out of draw.json (read under a shared
+ * lock). It never modifies draw.json, its version, results or backups.
+ *
  * Run with: php -S localhost:8000   (then open http://localhost:8000/)
  */
 
-$DATA_FILE  = __DIR__ . '/draw.json';
-$BACKUP_DIR = __DIR__ . '/backups';
+$DATA_FILE   = __DIR__ . '/draw.json';
+$BACKUP_DIR  = __DIR__ . '/backups';
+$DISPUTE_DIR = __DIR__ . '/disputes';
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
@@ -104,16 +110,58 @@ function score_value($value): ?int
 /** Make a filesystem-safe, non-empty scorer name. */
 function sanitise_user($value): string
 {
-	$name = cap_str($value, 80);
-	if ($name === '') {
+	return sanitise_slug($value, 40);
+}
+
+/**
+ * Make a filesystem-safe, non-empty slug for a filename segment. Mirrors
+ * sanitise_user() but caps to a caller-chosen length; only [A-Za-z0-9_-] survives.
+ */
+function sanitise_slug($value, int $max = 40): string
+{
+	$slug = cap_str($value, 120);
+	$slug = preg_replace('/[^A-Za-z0-9_-]+/', '-', $slug) ?? '';
+	$slug = trim($slug, '-');
+	if ($slug === '') {
 		return 'unknown';
 	}
-	$name = preg_replace('/[^A-Za-z0-9_-]+/', '-', $name) ?? '';
-	$name = trim($name, '-');
-	if ($name === '') {
-		return 'unknown';
+	return substr($slug, 0, $max);
+}
+
+/**
+ * Build the stored dispute filename from already-resolved game details. Client
+ * filenames are never trusted: every text segment is slugged and the caller
+ * supplies the server timestamp verbatim.
+ */
+function build_dispute_filename(
+	string $scorer,
+	string $competition,
+	int $round,
+	string $discipline,
+	string $home,
+	string $away,
+	string $timestamp
+): string {
+	$segments = [
+		'dispute',
+		sanitise_slug($scorer),
+		sanitise_slug($competition),
+		'R' . $round,
+	];
+	// Only add the discipline segment when supplied, so a whole-game dispute
+	// keeps the original filename shape.
+	if ($discipline !== '') {
+		$segments[] = sanitise_slug($discipline);
 	}
-	return substr($name, 0, 40);
+	$segments[] = sanitise_slug($home) . '-vs-' . sanitise_slug($away);
+	$segments[] = $timestamp;
+	$name = implode('_', $segments) . '.jpg';
+
+	// Keep the whole basename within a sane filesystem limit.
+	if (strlen($name) > 180) {
+		$name = substr($name, 0, 180 - strlen('.jpg')) . '.jpg';
+	}
+	return $name;
 }
 
 /** Normalise the player list to trimmed, non-empty, capped strings. */
@@ -164,6 +212,23 @@ function normalise_game(array $game): array
 	return $out;
 }
 
+/** True when a game has at least one saved score/ends value (matches the client gate). */
+function game_has_results(array $game): bool
+{
+	$scores = (isset($game['scores']) && is_array($game['scores'])) ? $game['scores'] : [];
+	foreach ($scores as $entry) {
+		if (!is_array($entry)) {
+			continue;
+		}
+		foreach (['homeScore', 'awayScore', 'homeEnds', 'awayEnds'] as $field) {
+			if (($entry[$field] ?? null) !== null) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 /**
  * Copy the saved data file into backups/, returning the backup filename or null.
  * Name: draw_<user>_<YYYYMMDD-HHMMSS>.json, with a numeric suffix on collision.
@@ -188,6 +253,39 @@ function backup_file(string $dataFile, string $backupDir, string $user): ?string
 		return null;
 	}
 	return basename($path);
+}
+
+/**
+ * Write image bytes into disputes/ under a unique name, created atomically with
+ * fopen($path, 'x') so two concurrent disputes can never overwrite each other.
+ * Collisions get a -1, -2, ... suffix (like backup_file()). Returns the stored
+ * basename, or null when the write fails; the retry loop is capped so a
+ * pathological name clash fails cleanly instead of spinning.
+ */
+function write_dispute_file(string $dir, string $basename, string $bytes): ?string
+{
+	$dot = strrpos($basename, '.');
+	$stem = $dot === false ? $basename : substr($basename, 0, $dot);
+	$ext  = $dot === false ? '' : substr($basename, $dot);
+
+	$attempts = 100;
+	for ($i = 0; $i < $attempts; $i++) {
+		$name = $i === 0 ? $basename : $stem . '-' . $i . $ext;
+		$path = $dir . '/' . $name;
+
+		$fh = @fopen($path, 'x');
+		if ($fh === false) {
+			continue; // name already taken — try the next suffix
+		}
+		$written = fwrite($fh, $bytes);
+		fclose($fh);
+		if ($written === strlen($bytes)) {
+			return $name;
+		}
+		@unlink($path); // never leave a truncated file behind
+		return null;
+	}
+	return null;
 }
 
 /**
@@ -332,6 +430,122 @@ function handle_save(string $dataFile, string $backupDir): void
 	]);
 }
 
+/**
+ * Save a compressed scorecard photo for one game into disputes/. The photo is
+ * base64 JPEG in the JSON body; the filename is built server-side from the game
+ * details read under a shared lock. draw.json is never modified.
+ */
+function handle_dispute(string $dataFile, string $disputeDir): void
+{
+	$raw = file_get_contents('php://input');
+	if ($raw === false || trim($raw) === '') {
+		respond(400, ['success' => false, 'error' => 'empty_body']);
+	}
+
+	// Bound the raw body before decoding: base64 in JSON is ~4/3 of its payload,
+	// so this rejects oversize uploads without materialising the decoded image.
+	if (strlen($raw) > 12 * 1024 * 1024) {
+		respond(413, ['success' => false, 'error' => 'too_large']);
+	}
+
+	$input = json_decode($raw, true);
+	if (!is_array($input)) {
+		respond(400, ['success' => false, 'error' => 'bad_body']);
+	}
+
+	$ci = filter_int($input['competitionIndex'] ?? null);
+	$ri = filter_int($input['roundIndex'] ?? null);
+	$gi = filter_int($input['gameIndex'] ?? null);
+	if ($ci === null || $ri === null || $gi === null || $ci < 0 || $ri < 0 || $gi < 0) {
+		respond(400, ['success' => false, 'error' => 'bad_indices']);
+	}
+
+	$userName = sanitise_user($input['userName'] ?? '');
+	$discipline = cap_str($input['discipline'] ?? '', 40);
+
+	// Resolve the game details under a shared lock (same read path as handle_load).
+	$lock = acquire_lock($dataFile, LOCK_SH);
+	$contents = @file_get_contents($dataFile);
+	release_lock($lock);
+
+	if ($contents === false) {
+		respond(500, ['success' => false, 'error' => 'data_unreadable']);
+	}
+
+	$draw = json_decode($contents, true);
+	if (!is_array($draw)) {
+		respond(500, ['success' => false, 'error' => 'data_corrupt']);
+	}
+
+	if (!isset($draw[$ci]['rounds'][$ri]['games'][$gi])
+		|| !is_array($draw[$ci]['rounds'][$ri]['games'][$gi])) {
+		respond(400, ['success' => false, 'error' => 'indices_out_of_range']);
+	}
+
+	$competition = $draw[$ci];
+	$round = $competition['rounds'][$ri];
+	$game = $round['games'][$gi];
+
+	// Defensive: the client also gates this, but a dispute needs saved results.
+	if (!game_has_results($game)) {
+		respond(400, ['success' => false, 'error' => 'no_results']);
+	}
+
+	// Decode the image: JPEG only (the client always re-encodes), verified by the
+	// data-URL prefix and the JPEG magic bytes so a .jpg file never holds PNG bytes.
+	$image = $input['image'] ?? null;
+	if (!is_string($image)) {
+		respond(400, ['success' => false, 'error' => 'bad_image']);
+	}
+	$prefix = 'data:image/jpeg;base64,';
+	if (strncmp($image, $prefix, strlen($prefix)) !== 0) {
+		respond(400, ['success' => false, 'error' => 'bad_image']);
+	}
+	// Bound the encoded payload too, so it is never base64-decoded into memory
+	// (base64 is ~4/3 of the decoded size; the decoded cap below is the backstop).
+	if (strlen($image) > 12 * 1024 * 1024) {
+		respond(413, ['success' => false, 'error' => 'too_large']);
+	}
+	$bytes = base64_decode(substr($image, strlen($prefix)), true);
+	if ($bytes === false || $bytes === '') {
+		respond(400, ['success' => false, 'error' => 'bad_image']);
+	}
+	if (strncmp($bytes, "\xFF\xD8\xFF", 3) !== 0) {
+		respond(400, ['success' => false, 'error' => 'bad_image']);
+	}
+	if (strlen($bytes) > 8 * 1024 * 1024) {
+		respond(413, ['success' => false, 'error' => 'too_large']);
+	}
+
+	// Filename: server timestamp + slugged game details (never a client filename).
+	$roundNumber = filter_int($round['round'] ?? null);
+	if ($roundNumber === null) {
+		$roundNumber = $ri + 1;
+	}
+	$basename = build_dispute_filename(
+		$userName,
+		$competition['competition'] ?? '',
+		$roundNumber,
+		$discipline,
+		$game['homeTeam'] ?? '',
+		$game['awayTeam'] ?? '',
+		date('Ymd-His')
+	);
+
+	if (!is_dir($disputeDir)) {
+		if (!@mkdir($disputeDir, 0775, true) && !is_dir($disputeDir)) {
+			respond(500, ['success' => false, 'error' => 'mkdir_failed']);
+		}
+	}
+
+	$stored = write_dispute_file($disputeDir, $basename, $bytes);
+	if ($stored === null) {
+		respond(500, ['success' => false, 'error' => 'write_failed']);
+	}
+
+	respond(200, ['success' => true, 'file' => $stored]);
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -345,6 +559,10 @@ if ($method === 'GET' && $action === 'load') {
 
 if ($method === 'POST' && $action === 'save') {
 	handle_save($DATA_FILE, $BACKUP_DIR);
+}
+
+if ($method === 'POST' && $action === 'dispute') {
+	handle_dispute($DATA_FILE, $DISPUTE_DIR);
 }
 
 respond(405, ['success' => false, 'error' => 'method_not_allowed']);

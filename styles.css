@@ -390,6 +390,33 @@ select:disabled {
 .dialog__actions {
 	display: flex;
 	justify-content: flex-end;
+	gap: 0.6rem;
+}
+
+/* ------------------------------------------------------------- dispute dialog */
+
+.dispute-summary {
+	margin: 0;
+	font-weight: 600;
+}
+
+.dispute-capture {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.6rem;
+}
+
+.dispute-preview {
+	border: 2px solid var(--line);
+	border-radius: 6px;
+	padding: 0.3rem;
+	max-width: 100%;
+}
+
+.dispute-preview img {
+	display: block;
+	max-width: 100%;
+	height: auto;
 }
 
 /* Hide the number input spinners for a tidier sheet. */
@@ -409,4 +436,378 @@ select:disabled {
 	border-color: #c0392b;
 	background: #ffe3e0;
 	outline: 1px solid #c0392b;
+}
+
+/* ========================================================================
+   Responsive layout
+   ------------------------------------------------------------------------
+   The sheet is filled in on the green, most often on a phone or tablet held
+   in either orientation. Everything below keeps the printed score-sheet look
+   while letting the tables, controls and dialogs reflow instead of spilling
+   past the sheet border on small or short screens.
+   ======================================================================== */
+
+:root {
+	/* Horizontal breathing room. Clamped so it shrinks on narrow screens and
+	   grows only slightly on wide ones. */
+	--gutter: clamp(0.6rem, 2.5vw, 1.25rem);
+}
+
+/* Stop mobile browsers inflating our text, which would wreck the table fit. */
+html {
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+}
+
+/* Keep content clear of notches/rounded corners and reserve room at the
+   bottom for the home indicator. */
+body {
+	padding-bottom: calc(3rem + env(safe-area-inset-bottom, 0px));
+}
+
+.scorer {
+	padding-left: calc(1.25rem + env(safe-area-inset-left, 0px));
+	padding-right: calc(1.25rem + env(safe-area-inset-right, 0px));
+}
+
+.page {
+	padding: var(--gutter);
+	padding-left: calc(var(--gutter) + env(safe-area-inset-left, 0px));
+	padding-right: calc(var(--gutter) + env(safe-area-inset-right, 0px));
+}
+
+/* The title scales with the viewport so it never crowds the border. */
+.sheet__title h2 {
+	font-size: clamp(1.1rem, 4.5vw, 1.5rem);
+	overflow-wrap: anywhere;
+}
+
+/* Ease the printed-sheet indent on the round line as space tightens. */
+.sheet__round {
+	margin-left: clamp(0.5rem, 3vw, 2.25rem);
+	flex-wrap: wrap;
+}
+
+/* Let selectors shrink rather than overflow their row. */
+.selectors {
+	align-items: flex-start;
+}
+
+.field {
+	min-width: 0;
+	max-width: 100%;
+}
+
+select {
+	max-width: 100%;
+}
+
+/* Tables -----------------------------------------------------------------
+   `table-layout: fixed` keeps the columns even, so long team names and
+   labels must be allowed to wrap inside their cells (and inputs to shrink)
+   or they spill past the sheet border. */
+.sheet-table,
+.player-table {
+	max-width: 100%;
+}
+
+.sheet-table th.team-head,
+.player-table th.team-head,
+.sheet-table th.disc,
+.player-table th.row-label {
+	overflow-wrap: anywhere;
+	word-break: break-word;
+	hyphens: auto;
+}
+
+.sheet-table td.cell input,
+.player-table td.cell input {
+	min-width: 0;
+}
+
+/* Save / status / dispute controls wrap instead of forcing the row wide. */
+.sheet__actions {
+	flex-wrap: wrap;
+}
+
+/* Dialogs: cap to the visible height and scroll internally, so a form (or a
+   tall scorecard photo) stays usable in landscape on a short screen. */
+.dialog {
+	width: min(24rem, calc(100% - 2rem));
+	max-height: calc(100dvh - 2rem);
+	overflow: auto;
+}
+
+.dialog__actions {
+	flex-wrap: wrap;
+}
+
+.dispute-summary {
+	overflow-wrap: anywhere;
+}
+
+.dispute-preview img {
+	max-height: 50dvh;
+	width: auto;
+}
+
+/* Responsive breakpoints ------------------------------------------------- */
+
+/* Tablets and large phones: trim the fixed padding and table type. */
+@media (max-width: 640px) {
+	:root {
+		--gutter: 0.85rem;
+	}
+
+	.sheet {
+		padding: 0.9rem;
+		border-width: 2px;
+	}
+
+	.sheet__title {
+		padding: 0.55rem 0.6rem;
+	}
+
+	/* Stack the three selectors so each gets the full width. */
+	.selectors {
+		flex-direction: column;
+	}
+
+	.field {
+		width: 100%;
+	}
+
+	select,
+	.field input[type="text"] {
+		width: 100%;
+	}
+
+	.sheet-table th.team-head,
+	.sheet-table th.disc,
+	.sheet-table td.metric,
+	.player-table th.team-head,
+	.player-table th.row-label {
+		font-size: 0.9rem;
+	}
+
+	/* Let "Score"/"Ends" wrap instead of forcing the metric column wide. */
+	.sheet-table td.metric {
+		white-space: normal;
+		padding-right: 0.3rem;
+	}
+
+	.sheet-table td.cell input,
+	.player-table td.cell input {
+		padding: 0.5rem 0.25rem;
+	}
+
+	.scorer {
+		font-size: 0.9rem;
+	}
+}
+
+/* Small phones (portrait): trim every remaining margin so four columns and
+   two name fields still fit with no horizontal scrollbar. */
+@media (max-width: 400px) {
+	:root {
+		--gutter: 0.6rem;
+	}
+
+	.sheet {
+		padding: 0.55rem;
+	}
+
+	.sheet__title h2 {
+		font-size: 1.05rem;
+	}
+
+	.sheet__round {
+		font-size: 0.95rem;
+	}
+
+	.sheet-table th.team-head,
+	.sheet-table th.disc,
+	.sheet-table td.metric,
+	.player-table th.team-head,
+	.player-table th.row-label {
+		font-size: 0.8rem;
+	}
+
+	.sheet-table td.cell input,
+	.player-table td.cell input {
+		padding: 0.45rem 0.15rem;
+	}
+
+	.scorer {
+		padding-top: 0.6rem;
+		font-size: 0.85rem;
+	}
+}
+
+/* Short landscape screens (a phone on its side): reclaim vertical space and
+   keep dialogs inside the very limited height. */
+@media (orientation: landscape) and (max-height: 560px) {
+	.sheet {
+		padding: 0.7rem;
+	}
+
+	.sheet__title {
+		padding: 0.4rem 0.6rem;
+		margin-bottom: 0.6rem;
+	}
+
+	.dialog {
+		max-height: calc(100dvh - 1rem);
+	}
+
+	.dispute-preview img {
+		max-height: 34vh;
+	}
+}
+
+/* Finger-sized controls where the pointer is coarse (phones/tablets). */
+@media (pointer: coarse) {
+	.primary-button,
+	.secondary-button {
+		min-height: 2.75rem;
+	}
+
+	.sheet-table td.cell input,
+	.player-table td.cell input {
+		padding-top: 0.55rem;
+		padding-bottom: 0.55rem;
+	}
+}
+
+/* Wide screens: let the sheet breathe a little more than the 720px cap. */
+@media (min-width: 1100px) {
+	.sheet {
+		max-width: 780px;
+	}
+}
+/* Tiny foldable cover displays (~280px): instead of breaking names mid-word,
+   keep whole words and comfortably sized cells by giving the two tables a
+   sane minimum width and letting just the sheet body scroll sideways. */
+@media (max-width: 300px) {
+	#sheetBody {
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+	}
+
+	.sheet-table,
+	.player-table {
+		min-width: 280px;
+	}
+}
+/* --------------------------------------------------- per-discipline dispute */
+
+/* Each game (discipline) carries its own Dispute button: the discipline name
+   and the button are stacked and centred inside the coloured discipline cell,
+   so the button sits directly below the name. */
+.disc__inner {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.disc__name {
+	display: block;
+}
+
+.disc-dispute-button {
+	display: inline-block;
+	margin: 0;
+	padding: 0.3rem 0.7rem;
+	font: inherit;
+	font-size: 0.72rem;
+	font-weight: 700;
+	line-height: 1.1;
+	letter-spacing: 0.01em;
+	white-space: nowrap;
+	color: var(--ink);
+	background: #fff;
+	border: 2px solid var(--ink);
+	border-radius: 999px;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+	cursor: pointer;
+	transition: background-color 0.15s ease, color 0.15s ease, transform 0.06s ease;
+}
+
+/* Invert on hover so the affordance is obvious. */
+.disc-dispute-button:hover {
+	background: var(--ink);
+	color: #fff;
+}
+
+.disc-dispute-button:active {
+	transform: translateY(1px);
+}
+
+.disc-dispute-button:focus-visible {
+	outline: 3px solid #1f6feb;
+	outline-offset: 2px;
+}
+
+/* Shown by default, but hidden/disabled until this game has saved results. */
+.disc-dispute-button[hidden] {
+	display: none;
+}
+
+.disc-dispute-button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+	box-shadow: none;
+}
+
+@media (max-width: 640px) {
+	.disc__inner {
+		gap: 0.35rem;
+	}
+
+	.disc-dispute-button {
+		font-size: 0.62rem;
+		padding: 0.28rem 0.45rem;
+	}
+}
+
+/* On phones the discipline column is too narrow for a compact pill, so the
+   button fills the cell (still centred) and never spills past it. */
+@media (max-width: 480px) {
+	.disc-dispute-button {
+		width: 100%;
+		padding: 0.3rem 0.2rem;
+	}
+}
+
+/* Keep the scorecard preview comfortably inside the dialog: centred, capped,
+   and clearly narrower than the dialog on phones so it reads as a preview. */
+.dispute-preview {
+	display: flex;
+	justify-content: center;
+	max-width: 100%;
+}
+
+/* `display: flex` above would otherwise beat the UA `[hidden]` rule, leaving an
+   empty/broken preview frame visible before any photo is chosen. */
+.dispute-preview[hidden] {
+	display: none;
+}
+
+.dispute-preview img {
+	max-width: 100%;
+	max-height: min(50dvh, 480px);
+	width: auto;
+	height: auto;
+}
+
+@media (max-width: 640px) {
+	.dispute-preview {
+		max-width: 82%;
+		margin-inline: auto;
+	}
+
+	.dispute-preview img {
+		max-height: 40vh;
+	}
 }
