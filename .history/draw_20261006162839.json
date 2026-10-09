@@ -1,0 +1,122 @@
+[
+	{
+		"round": 1,
+		"date": "2026-10-17",
+		"games": [
+			{
+				"homeTeam": "Dunsandel",
+				"awayTeam": "Leeston 1",
+				"scores": [
+					{
+						"discipline": "singles",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "pairs",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "triples",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					}
+				]
+			},
+			{
+				"homeTeam": "Lincoln Red",
+				"awayTeam": "Lincoln Gold",
+				"scores": [
+					{
+						"discipline": "singles",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "pairs",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "triples",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					}
+				]
+			}
+		]
+	},
+	{
+		"round": 2,
+		"date": "2026-10-24",
+		"games": [
+			{
+				"homeTeam": "Lincoln Gold",
+				"awayTeam": "Dunsandel",
+				"scores": [
+					{
+						"discipline": "singles",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "pairs",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "triples",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					}
+				]
+			},
+			{
+				"homeTeam": "Leeston 1",
+				"awayTeam": "Lincoln Red",
+				"scores": [
+					{
+						"discipline": "singles",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "pairs",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					},
+					{
+						"discipline": "triples",
+						"homeScore": null,
+						"awayScore": null,
+						"homeEnds": null,
+						"awayEnds": null
+					}
+				]
+			}
+		]
+	}
+]

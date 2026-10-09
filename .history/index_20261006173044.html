@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Rooster Cup Score Sheet</title>
+	<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+	<header class="app-bar">
+		<h1 class="app-bar__title">Rooster Cup Score Sheet</h1>
+		<div class="app-bar__scorer">
+			<span>Scorer: <strong id="scorerNameDisplay">&mdash;</strong></span>
+			<button type="button" id="changeScorerButton" class="link-button">change</button>
+		</div>
+	</header>
+
+	<main class="page">
+		<section class="selectors" aria-label="Fixture selection">
+			<label class="field">
+				<span class="field__label">Competition</span>
+				<select id="competitionSelect">
+					<option value="">Select&hellip;</option>
+				</select>
+			</label>
+
+			<label class="field">
+				<span class="field__label">Round</span>
+				<select id="roundSelect" disabled>
+					<option value="">Select&hellip;</option>
+				</select>
+			</label>
+
+			<label class="field">
+				<span class="field__label">Fixture</span>
+				<select id="fixtureSelect" disabled>
+					<option value="">Select&hellip;</option>
+				</select>
+			</label>
+		</section>
+
+		<!-- Conflict / draft notices are rendered here. -->
+		<div id="banners" class="banners" aria-live="polite"></div>
+
+		<section id="sheet" class="sheet" hidden>
+			<div class="sheet__title">
+				<h2 id="sheetTitle">Score Sheet</h2>
+			</div>
+
+			<div class="sheet__round">
+				<span class="sheet__round-label">Round</span>
+				<span id="sheetRound" class="round-badge"></span>
+			</div>
+
+			<!-- Discipline table, team headers and player table are built here. -->
+			<div id="sheetBody"></div>
+
+			<div class="sheet__actions">
+				<button type="button" id="saveButton" class="primary-button" disabled>Save</button>
+				<span id="saveStatus" class="save-status" role="status"></span>
+			</div>
+		</section>
+
+		<p id="emptyState" class="empty-state">
+			Select a competition, round and fixture to enter results.
+		</p>
+	</main>
+
+	<!-- First-visit (and "change") scorer-name dialog. -->
+	<dialog id="nameDialog" class="dialog">
+		<form method="dialog" id="nameForm" class="dialog__form">
+			<h2 class="dialog__title">Who is scoring?</h2>
+			<p class="dialog__hint">
+				Your name is stored on this device and recorded against every save.
+			</p>
+			<label class="field">
+				<span class="field__label">Your name</span>
+				<input type="text" id="nameInput" autocomplete="name" maxlength="60" required />
+			</label>
+			<div class="dialog__actions">
+				<button type="submit" class="primary-button">Continue</button>
+			</div>
+		</form>
+	</dialog>
+
+	<script src="app.js"></script>
+</body>
+</html>

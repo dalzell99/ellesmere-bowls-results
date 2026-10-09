@@ -1,0 +1,2 @@
+# Keeps the backups/ folder in source control.
+# The score-sheet app writes post-save snapshots here as draw_<user>_<timestamp>.json.

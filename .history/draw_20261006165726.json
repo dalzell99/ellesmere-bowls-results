@@ -1,0 +1,96 @@
+[
+	{
+		"competition": "Rooster",
+		"discipline": ["singles", "pairs", "triples"],
+		"numPlayers": 6,
+		"rounds": [
+			{
+				"round": 1,
+				"date": "2026-10-17",
+				"games": [
+					{
+						"homeTeam": "Dunsandel",
+						"awayTeam": "Leeston 1",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					},
+					{
+						"homeTeam": "Lincoln Red",
+						"awayTeam": "Lincoln Gold",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					}
+				]
+			},
+			{
+				"round": 2,
+				"date": "2026-10-24",
+				"games": [
+					{
+						"homeTeam": "Lincoln Gold",
+						"awayTeam": "Dunsandel",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					},
+					{
+						"homeTeam": "Leeston 1",
+						"awayTeam": "Lincoln Red",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					}
+				]
+			}
+		]
+	},
+	{
+		"competition": "Chatterton",
+		"discipline": ["singles", "pairs", "triples", "fours"],
+		"numPlayers": 5,
+		"rounds": [
+			{
+				"round": 1,
+				"date": "2026-10-17",
+				"games": [
+					{
+						"homeTeam": "Dunsandel",
+						"awayTeam": "Lincoln Gold",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					},
+					{
+						"homeTeam": "Leeston 1",
+						"awayTeam": "Lincoln Red",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					}
+				]
+			},
+			{
+				"round": 2,
+				"date": "2026-10-24",
+				"games": [
+					{
+						"homeTeam": "Leeston 1",
+						"awayTeam": "Dunsandel",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					},
+					{
+						"homeTeam": "Lincoln Red",
+						"awayTeam": "Lincoln Gold",
+						"homePlayers": [],
+						"awayPlayers": [],
+						"scores": []
+					}
+				]
+			}
+		]
+	}
+]

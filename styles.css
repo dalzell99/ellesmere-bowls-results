@@ -1,0 +1,421 @@
+/* Rooster Cup Score Sheet — layout styled after the printed score sheet. */
+
+:root {
+	--ink: #111;
+	--line: #111;
+	--page-bg: #eceae4;
+	--sheet-bg: #ffffff;
+	--title-bg: #f7efc0;
+	--title-border: #c0392b;
+	--input-bg: #f4f2b0;
+	--player-input-bg: #e8eeff;
+	--divider-bg: #c9c9c9;
+	--singles: #a9c7e8;
+	--pairs: #f4b183;
+	--triples: #a9d18e;
+	--fours: #c9a7e0;
+	--notice-bg: #fff6d8;
+	--notice-border: #d9a300;
+	--notice-danger-bg: #ffe3e0;
+	--notice-danger-border: #c0392b;
+	--button: #1f6feb;
+	--button-text: #fff;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	padding: 0 0 3rem;
+	font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	color: var(--ink);
+	background: var(--page-bg);
+}
+
+/* ------------------------------------------------------------------ app bar */
+
+.app-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem 1.5rem;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.9rem 1.25rem;
+	background: #fff;
+	border-bottom: 2px solid var(--line);
+}
+
+.app-bar__title {
+	margin: 0;
+	font-size: 1.15rem;
+}
+
+.app-bar__scorer {
+	font-size: 0.95rem;
+}
+
+.link-button {
+	border: 0;
+	background: none;
+	color: var(--button);
+	text-decoration: underline;
+	cursor: pointer;
+	font: inherit;
+	padding: 0 0.15rem;
+}
+
+/* ----------------------------------------------------------------- selectors */
+
+.page {
+	max-width: 900px;
+	margin: 0 auto;
+	padding: 1.25rem;
+}
+
+.selectors {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1rem;
+	margin-bottom: 1rem;
+}
+
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3rem;
+}
+
+.field__label {
+	font-size: 0.85rem;
+	font-weight: 600;
+}
+
+select,
+input[type="text"],
+input[type="number"] {
+	font: inherit;
+	padding: 0.4rem 0.5rem;
+	border: 1px solid #8a8a8a;
+	border-radius: 4px;
+	background: #fff;
+}
+
+select:disabled {
+	background: #f1f1f1;
+	color: #888;
+}
+
+/* ------------------------------------------------------------------- notices */
+
+.banners {
+	display: flex;
+	flex-direction: column;
+	gap: 0.6rem;
+	margin-bottom: 1rem;
+}
+
+.notice {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.6rem 1rem;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.7rem 0.9rem;
+	border: 2px solid var(--notice-border);
+	background: var(--notice-bg);
+	border-radius: 6px;
+	font-size: 0.95rem;
+}
+
+.notice--danger {
+	border-color: var(--notice-danger-border);
+	background: var(--notice-danger-bg);
+}
+
+.notice__text {
+	flex: 1 1 18rem;
+}
+
+.notice__actions {
+	display: flex;
+	gap: 0.5rem;
+}
+
+/* --------------------------------------------------------------------- sheet */
+
+.sheet {
+	background: var(--sheet-bg);
+	border: 3px solid var(--line);
+	padding: 1.25rem;
+	max-width: 720px;
+	margin: 0 auto;
+}
+
+.sheet__title {
+	border: 3px solid var(--title-border);
+	background: var(--title-bg);
+	padding: 0.7rem 1rem;
+	text-align: center;
+	margin-bottom: 1rem;
+}
+
+.sheet__title h2 {
+	margin: 0;
+	font-size: 1.5rem;
+}
+
+.sheet__round {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	margin: 0 0 1rem 2.25rem;
+	font-size: 1.05rem;
+}
+
+.sheet__round-label {
+	font-weight: 600;
+}
+
+.round-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 2.1rem;
+	min-height: 1.9rem;
+	padding: 0.1rem 0.4rem;
+	border: 3px solid var(--title-border);
+	background: #fff;
+	font-weight: 700;
+}
+
+/* ---------------------------------------------------------- discipline table */
+
+.sheet-table,
+.player-table {
+	width: 100%;
+	border-collapse: collapse;
+	table-layout: fixed;
+}
+
+.sheet-table th,
+.sheet-table td,
+.player-table th,
+.player-table td {
+	border: 2px solid var(--line);
+	padding: 3px 4px;
+}
+
+.sheet-table th.team-head {
+	background: #f3f3f3;
+	text-align: center;
+	font-size: 1.05rem;
+}
+
+.sheet-table th.team-head--blank,
+.player-table th.team-head--blank {
+	background: transparent;
+	border: 0;
+}
+
+.sheet-table th.disc {
+	text-align: center;
+	vertical-align: middle;
+	font-size: 1.05rem;
+	font-weight: 700;
+	width: 22%;
+}
+
+.disc--singles {
+	background: var(--singles);
+}
+
+.disc--pairs {
+	background: var(--pairs);
+}
+
+.disc--triples {
+	background: var(--triples);
+}
+
+.disc--fours {
+	background: var(--fours);
+}
+
+.disc--unknown {
+	background: #e2e2e2;
+}
+
+.sheet-table td.metric {
+	font-style: italic;
+	font-weight: 600;
+	text-align: right;
+	white-space: nowrap;
+	width: 16%;
+	padding-right: 0.5rem;
+}
+
+.sheet-table td.cell,
+.player-table td.cell {
+	padding: 2px;
+}
+
+.sheet-table td.cell input,
+.player-table td.cell input {
+	display: block;
+	width: 100%;
+	border: 1px solid #9a9a9a;
+	border-radius: 2px;
+	text-align: center;
+	padding: 0.35rem 0.2rem;
+}
+
+.sheet-table td.cell input {
+	background: var(--input-bg);
+}
+
+.player-table td.cell input {
+	background: var(--player-input-bg);
+	text-align: left;
+}
+
+td.divider {
+	background: var(--divider-bg);
+	width: 8%;
+}
+
+.sheet-table td.section-gap,
+.player-table td.section-gap {
+	border-left: 0;
+	border-right: 0;
+}
+
+.sheet-table .metrics-header {
+	background: #f3f3f3;
+}
+
+/* -------------------------------------------------------------- player table */
+
+.player-table {
+	margin-top: 1.25rem;
+}
+
+.player-table th.row-label {
+	text-align: right;
+	font-weight: 700;
+	width: 22%;
+	border: 0;
+	padding-right: 0.75rem;
+}
+
+.player-table th.team-head {
+	background: #f3f3f3;
+	text-align: center;
+}
+
+.player-table td.cell {
+	width: 33%;
+}
+
+/* -------------------------------------------------------------- actions */
+
+.sheet__actions {
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+	margin-top: 1.25rem;
+}
+
+.primary-button {
+	font: inherit;
+	font-weight: 600;
+	padding: 0.55rem 1.4rem;
+	border: 2px solid var(--button);
+	border-radius: 6px;
+	background: var(--button);
+	color: var(--button-text);
+	cursor: pointer;
+}
+
+.primary-button:disabled {
+	background: #b9b9b9;
+	border-color: #b9b9b9;
+	cursor: not-allowed;
+}
+
+.secondary-button {
+	font: inherit;
+	padding: 0.4rem 0.9rem;
+	border: 2px solid var(--line);
+	border-radius: 6px;
+	background: #fff;
+	cursor: pointer;
+}
+
+.save-status {
+	font-size: 0.95rem;
+}
+
+.save-status--ok {
+	color: #157a2f;
+}
+
+.save-status--error {
+	color: #b42318;
+}
+
+.empty-state {
+	text-align: center;
+	color: #555;
+	margin-top: 2rem;
+}
+
+/* ------------------------------------------------------------------- dialog */
+
+.dialog {
+	border: 2px solid var(--line);
+	border-radius: 8px;
+	padding: 0;
+	max-width: 24rem;
+	width: calc(100% - 2rem);
+}
+
+.dialog::backdrop {
+	background: rgba(0, 0, 0, 0.45);
+}
+
+.dialog__form {
+	padding: 1.25rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.8rem;
+}
+
+.dialog__title {
+	margin: 0;
+	font-size: 1.2rem;
+}
+
+.dialog__hint {
+	margin: 0;
+	font-size: 0.9rem;
+	color: #555;
+}
+
+.dialog__actions {
+	display: flex;
+	justify-content: flex-end;
+}
+
+/* Hide the number input spinners for a tidier sheet. */
+.sheet-table input[type="number"]::-webkit-outer-spin-button,
+.sheet-table input[type="number"]::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
+}
+
+.sheet-table input[type="number"] {
+	-moz-appearance: textfield;
+	appearance: textfield;
+}
