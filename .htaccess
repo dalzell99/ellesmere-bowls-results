@@ -1,0 +1,29 @@
+# Ellesmere Interclub Score Sheet — Apache hardening for the deployed scoring/ dir.
+#
+# Apache 2.4. These directives are only effective when the vhost's AllowOverride
+# permits them; verify on the host. We deliberately do NOT set `Options -Indexes`
+# here: that directive makes Apache reject the whole file (HTTP 500 for every
+# request under this directory) whenever AllowOverride does not grant `Options`.
+# Ask ops to disable directory indexes in the vhost instead.
+#
+# Deny by filename (requires mod_authz_core via AllowOverride AuthConfig).
+<FilesMatch "\.(sqlite|sqlite-wal|sqlite-shm|sqlite-journal)$">
+	Require all denied
+</FilesMatch>
+
+<FilesMatch "^(draw\.json|db\.php|auth\.php|security\.php|seed\.php)$">
+	Require all denied
+</FilesMatch>
+# Apache 2.2 fallback: use `Deny from all` instead of `Require all denied`.
+
+# Path-based denies as defence in depth: these work under AllowOverride FileInfo
+# (mod_rewrite) even when AuthConfig is not granted, so the database, the seed,
+# the server-side includes, backups, disputes and VCS/tooling metadata stay
+# unreachable however the host is configured. [F] returns 403 Forbidden.
+# PHP still reads disputes/ and backups/ through the filesystem, so the app is
+# unaffected by the directory denies.
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	RewriteRule (^|/)(\.git|\.history|\.kilo|backups|disputes)(/|$) - [F]
+	RewriteRule (^|/)(draw\.sqlite[^/]*|draw\.json|db\.php|auth\.php|security\.php|seed\.php)$ - [F]
+</IfModule>

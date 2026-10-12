@@ -83,7 +83,8 @@ body {
 
 select,
 input[type="text"],
-input[type="number"] {
+input[type="number"],
+input[type="password"] {
 	font: inherit;
 	padding: 0.4rem 0.5rem;
 	border: 1px solid #8a8a8a;
@@ -337,6 +338,16 @@ select:disabled {
 	cursor: pointer;
 }
 
+/* Destructive variant: red border/text over the secondary base, tinted on hover. */
+.danger-button {
+	border-color: var(--notice-danger-border);
+	color: var(--notice-danger-border);
+}
+
+.danger-button:hover {
+	background: var(--notice-danger-bg);
+}
+
 .save-status {
 	font-size: 0.95rem;
 }
@@ -578,7 +589,8 @@ select {
 	}
 
 	select,
-	.field input[type="text"] {
+	.field input[type="text"],
+	.field input[type="password"] {
 		width: 100%;
 	}
 
@@ -811,3 +823,477 @@ select {
 		max-height: 40vh;
 	}
 }
+
+/* ========================================================================
+   Results & Disputes page (results.php)
+   ------------------------------------------------------------------------
+   Standalone admin/listing page: filters, a games table with inline editing
+   of result-less games, a disputes list plus fullscreen viewer, and a counts
+   table. Reuses the score-sheet palette and the shared .dialog/.button/
+   .save-status/.notice classes; only layout specific to this page is added.
+   ======================================================================== */
+
+.admin-header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.6rem 1rem;
+	padding: 1rem calc(var(--gutter) + env(safe-area-inset-right, 0px)) 0
+		calc(var(--gutter) + env(safe-area-inset-left, 0px));
+}
+
+.admin-title {
+	margin: 0;
+	font-size: clamp(1.15rem, 4vw, 1.6rem);
+}
+
+.admin-header__actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.75rem;
+}
+
+.admin-header__actions .scorer {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+	padding: 0;
+}
+
+.admin-page {
+	max-width: 1100px;
+	margin: 0 auto;
+	padding: var(--gutter);
+	padding-left: calc(var(--gutter) + env(safe-area-inset-left, 0px));
+	padding-right: calc(var(--gutter) + env(safe-area-inset-right, 0px));
+	display: flex;
+	flex-direction: column;
+	gap: 1.75rem;
+}
+
+.admin-section {
+	background: var(--sheet-bg);
+	border: 2px solid var(--line);
+	border-radius: 6px;
+	padding: 1rem;
+}
+
+.admin-section__title {
+	margin: 0 0 0.75rem;
+	font-size: 1.15rem;
+}
+
+.admin-section__hint {
+	margin: -0.35rem 0 0.85rem;
+	font-size: 0.85rem;
+	color: #555;
+}
+
+/* Tabs (Games / Disputes / Games played): the active tab is mirrored in the URL
+   hash; only its panel is shown, and every panel stays rendered underneath. */
+.tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.3rem;
+	border-bottom: 2px solid var(--line);
+}
+
+.tab {
+	font: inherit;
+	font-weight: 600;
+	padding: 0.5rem 1rem;
+	border: 2px solid var(--line);
+	border-bottom: none;
+	border-radius: 6px 6px 0 0;
+	background: #f3f3f3;
+	color: inherit;
+	cursor: pointer;
+	margin-bottom: -2px;
+}
+
+.tab.is-active {
+	background: var(--sheet-bg);
+}
+
+.tab:focus-visible {
+	outline: 2px solid var(--button);
+	outline-offset: 2px;
+}
+
+/* Games toolbar: the filters plus the Add game button. */
+.games-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 1rem;
+	margin-bottom: 1rem;
+}
+
+.games-toolbar .filters {
+	flex: 1 1 auto;
+	margin-bottom: 0;
+}
+
+.filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 1rem;
+	margin-bottom: 1rem;
+}
+
+/* Wide tables scroll inside their section instead of the whole page. */
+.table-scroll {
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+/* --------------------------------------------------------------- admin table */
+
+.admin-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.9rem;
+}
+
+.admin-table th,
+.admin-table td {
+	border: 1px solid #bbb;
+	padding: 0.35rem 0.5rem;
+	text-align: left;
+	vertical-align: top;
+}
+
+.admin-table thead th {
+	background: #f3f3f3;
+	font-weight: 700;
+	white-space: nowrap;
+}
+
+.admin-table .muted {
+	color: #999;
+}
+
+.games-table {
+	min-width: 620px;
+}
+
+.disputes-table {
+	min-width: 620px;
+}
+
+.admin-row--edit > td {
+	background: #faf9f4;
+}
+
+.admin-row--clickable {
+	cursor: pointer;
+}
+
+.admin-row--clickable:hover,
+.admin-row--clickable:focus-visible {
+	background: #eef3ff;
+	outline: none;
+}
+
+/* A flagged person (see computeFlags): tinted row so it stands out. */
+.admin-row--flagged > td {
+	background: var(--notice-danger-bg);
+}
+
+.result-line {
+	white-space: nowrap;
+}
+
+.edit-cell .secondary-button {
+	padding: 0.3rem 0.7rem;
+	font-size: 0.85rem;
+}
+
+/* Per-row Delete control in the disputes table (its own cell, never wrapped). */
+.row-actions {
+	white-space: nowrap;
+}
+
+.row-actions .danger-button {
+	padding: 0.25rem 0.6rem;
+	font-size: 0.85rem;
+}
+
+/* ------------------------------------------------------------ inline editor */
+
+.game-edit {
+	display: flex;
+	flex-direction: column;
+	gap: 0.9rem;
+}
+
+.game-edit__note {
+	margin: 0;
+	color: #555;
+	font-size: 0.85rem;
+}
+
+.game-edit__actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.75rem;
+}
+
+.game-edit__actions .primary-button,
+.game-edit__actions .secondary-button {
+	padding: 0.35rem 0.9rem;
+	font-size: 0.85rem;
+}
+
+.edit-disc {
+	border: 1px solid #ccc;
+	border-radius: 6px;
+	padding: 0.6rem 0.7rem;
+	background: #fff;
+}
+
+/* Date/team fields shown only for a resultless game (three across, or stacked). */
+.edit-details {
+	border: 1px solid #ccc;
+	border-radius: 6px;
+	padding: 0.6rem 0.7rem;
+	background: #fff;
+}
+
+.edit-details__grid {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 0.5rem;
+}
+
+/* Add-game dialog: keep its selects/inputs inside the dialog's width. */
+#addGameDialog .field select,
+#addGameDialog .field input {
+	width: 100%;
+	min-width: 0;
+}
+
+.edit-disc__head {
+	margin-bottom: 0.35rem;
+}
+
+.edit-disc__name {
+	font-weight: 700;
+}
+
+.edit-disc__players {
+	margin-bottom: 0.5rem;
+	font-size: 0.82rem;
+	color: #444;
+}
+
+.edit-disc__players-line {
+	overflow-wrap: anywhere;
+}
+
+.edit-disc__grid {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 0.5rem;
+}
+
+.edit-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+	min-width: 0;
+}
+
+.edit-field__label {
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: #444;
+}
+
+.edit-field input {
+	width: 100%;
+	min-width: 0;
+}
+
+/* Invalid number styling matched to the score sheet's look. */
+.game-edit input.is-invalid,
+.dispute-viewer input.is-invalid {
+	border-color: #c0392b;
+	background: #ffe3e0;
+	outline: 1px solid #c0392b;
+}
+
+/* ------------------------------------------------------------ counts table */
+
+.counts-table .total-cell {
+	font-weight: 700;
+	text-align: center;
+}
+
+.flag-cell {
+	white-space: nowrap;
+}
+
+.flag-badge {
+	display: inline-block;
+	padding: 0.15rem 0.5rem;
+	font-size: 0.78rem;
+	font-weight: 700;
+	color: #7a1409;
+	background: #ffd9d3;
+	border: 1px solid #c0392b;
+	border-radius: 999px;
+}
+
+/* ---------------------------------------------------- fullscreen dispute view */
+
+/* Override the shared .dialog sizing: the viewer fills the viewport. */
+.dispute-viewer {
+	width: 100vw;
+	max-width: none;
+	height: 100dvh;
+	max-height: none;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	border-radius: 0;
+	overflow: hidden;
+	background: #111;
+}
+
+.dispute-viewer::backdrop {
+	background: rgba(0, 0, 0, 0.85);
+}
+
+.dispute-viewer__layout {
+	display: flex;
+	width: 100%;
+	height: 100%;
+}
+
+.dispute-viewer__image-wrap {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	overflow: auto;
+	padding: 0.5rem;
+	background: #111;
+}
+
+.dispute-viewer__image-wrap img {
+	max-width: 100%;
+	max-height: 100%;
+	object-fit: contain;
+}
+
+.dispute-viewer__panel {
+	flex: 0 0 clamp(18rem, 34vw, 26rem);
+	max-width: 100%;
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	padding: 1rem;
+	background: var(--sheet-bg);
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+.dispute-viewer__panel .dialog__actions {
+	margin-top: auto;
+}
+
+.dispute-viewer__form {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+/* Responsive adjustments ------------------------------------------------ */
+
+@media (max-width: 760px) {
+	.filters {
+		flex-direction: column;
+		gap: 0.6rem;
+	}
+
+	.filters .field {
+		width: 100%;
+	}
+
+	.filters select {
+		width: 100%;
+	}
+
+	/* Stack the scorecard above the editing panel on narrow screens. */
+	.dispute-viewer__layout {
+		flex-direction: column;
+	}
+
+	.dispute-viewer__image-wrap {
+		flex: 0 0 45dvh;
+	}
+
+	.dispute-viewer__panel {
+		flex: 1 1 auto;
+	}
+}
+
+/* Phones: the games table is intentionally wider than the viewport and scrolls
+   sideways. The inline editor spans every column, so without this it inherits
+   the table's full width and its fields sit half off-screen behind that scroll.
+   Pin the editor to the left edge of the scroll box and size it to the visible
+   width so it stays in view without a sideways drag. */
+@media (max-width: 760px) {
+	.admin-row--edit > td {
+		padding: 0;
+	}
+
+	.game-edit {
+		position: sticky;
+		left: 0;
+		width: calc(100vw - 5rem);
+		max-width: 100%;
+		padding: 0.5rem 1rem 0.5rem 0.75rem;
+	}
+}
+
+@media (max-width: 480px) {
+	.admin-section {
+		padding: 0.7rem;
+	}
+
+	.edit-disc__grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.edit-details__grid {
+		grid-template-columns: repeat(1, minmax(0, 1fr));
+	}
+}
+
+/* Short landscape screens: keep the two-column viewer but bound the panel. */
+@media (orientation: landscape) and (max-height: 560px) {
+	.dispute-viewer__panel {
+		padding: 0.7rem;
+	}
+
+	.dispute-viewer__image-wrap {
+		padding: 0.25rem;
+	}
+}
+
+/* Finger-sized controls on touch devices. */
+@media (pointer: coarse) {
+	.game-edit__actions .primary-button,
+	.game-edit__actions .secondary-button,
+	.edit-cell .secondary-button,
+	.tab {
+		min-height: 2.5rem;
+	}
+}
+/* Visually hidden but available to screen readers (h1, field error messages). */.sr-only {	position: absolute;	width: 1px;	height: 1px;	padding: 0;	margin: -1px;	overflow: hidden;	clip: rect(0 0 0 0);	white-space: nowrap;	border: 0;}

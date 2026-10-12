@@ -10,7 +10,6 @@
  */
 
 const API = 'api.php';
-const KNOWN_DISCIPLINES = ['singles', 'pairs', 'triples', 'fours'];
 const DISCIPLINE_CLASS = {
 	singles: 'disc--singles',
 	pairs: 'disc--pairs',
@@ -561,14 +560,26 @@ function buildDisciplineTable(game) {
 				scoreRow.appendChild(discCell);
 			}
 			scoreRow.appendChild(element('td', 'Score', 'metric'));
-			scoreRow.appendChild(numberCell(item.index, 'homeScore', saved.homeScore));
-			scoreRow.appendChild(numberCell(item.index, 'awayScore', saved.awayScore));
+			scoreRow.appendChild(numberCell(
+				item.index, 'homeScore', saved.homeScore,
+				`${game.homeTeam || ''} ${capitalise(group.name)} score`
+			));
+			scoreRow.appendChild(numberCell(
+				item.index, 'awayScore', saved.awayScore,
+				`${game.awayTeam || ''} ${capitalise(group.name)} score`
+			));
 			tbody.appendChild(scoreRow);
 
 			const endsRow = document.createElement('tr');
 			endsRow.appendChild(element('td', 'Ends', 'metric'));
-			endsRow.appendChild(numberCell(item.index, 'homeEnds', saved.homeEnds));
-			endsRow.appendChild(numberCell(item.index, 'awayEnds', saved.awayEnds));
+			endsRow.appendChild(numberCell(
+				item.index, 'homeEnds', saved.homeEnds,
+				`${game.homeTeam || ''} ${capitalise(group.name)} ends`
+			));
+			endsRow.appendChild(numberCell(
+				item.index, 'awayEnds', saved.awayEnds,
+				`${game.awayTeam || ''} ${capitalise(group.name)} ends`
+			));
 			tbody.appendChild(endsRow);
 		});
 	}
@@ -577,7 +588,7 @@ function buildDisciplineTable(game) {
 	return table;
 }
 
-function numberCell(disciplineIndex, field, value) {
+function numberCell(disciplineIndex, field, value, label) {
 	const td = element('td', null, 'cell');
 	const input = document.createElement('input');
 	input.type = 'number';
@@ -586,6 +597,9 @@ function numberCell(disciplineIndex, field, value) {
 	input.setAttribute('inputmode', 'numeric');
 	input.dataset.discIdx = String(disciplineIndex);
 	input.dataset.field = field;
+	if (label) {
+		input.setAttribute('aria-label', label);
+	}
 	if (value !== null && value !== undefined && value !== '') {
 		input.value = String(value);
 	}
@@ -609,21 +623,22 @@ function buildPlayerTable(game) {
 	for (let i = 0; i < state.numPlayers; i++) {
 		const row = document.createElement('tr');
 		row.appendChild(element('th', `Player ${i + 1}`, 'row-label'));
-		row.appendChild(playerCell('home', i, (game.homePlayers || [])[i]));
-		row.appendChild(playerCell('away', i, (game.awayPlayers || [])[i]));
+		row.appendChild(playerCell('home', i, (game.homePlayers || [])[i], game.homeTeam));
+		row.appendChild(playerCell('away', i, (game.awayPlayers || [])[i], game.awayTeam));
 		tbody.appendChild(row);
 	}
 	table.appendChild(tbody);
 	return table;
 }
 
-function playerCell(side, index, value) {
+function playerCell(side, index, value, team) {
 	const td = element('td', null, 'cell');
 	const input = document.createElement('input');
 	input.type = 'text';
 	input.maxLength = 60;
 	input.autocomplete = 'off';
 	input.setAttribute('list', side === 'home' ? 'players-home' : 'players-away');
+	input.setAttribute('aria-label', `${team || ''} player ${index + 1}`.trim());
 	input.dataset.playerSide = side;
 	input.dataset.playerIndex = String(index);
 	if (value != null && value !== '') {
@@ -702,104 +717,18 @@ function collectTeamPlayers(team) {
 // ---------------------------------------------------------------------------
 
 /**
- * Condition for a discipline in the current competition, or null when the
- * discipline has none (in which case any value is valid). Returns { num, type }
- * with type lowercased ("score" or "ends").
+ * Condition violations and the score-vs-ends rule live in validation.js (shared
+ * with results.js); app.js only wires them to the sheet. The server-side mirror
+ * is db.php validate_game().
  */
-function conditionFor(disciplineName) {
-	const competition = state.draw && state.draw[state.competitionIndex];
-	const conditions = competition && competition.conditions;
-	if (!conditions || typeof conditions !== 'object') {
-		return null;
-	}
-	const condition = conditions[disciplineName];
-	if (!condition || typeof condition !== 'object') {
-		return null;
-	}
-	const num = Number(condition.num);
-	if (!Number.isFinite(num)) {
-		return null;
-	}
-	return { num, type: String(condition.type || '').toLowerCase() };
-}
-
-/**
- * Condition violations for one discipline's values, as { field, message } pairs.
- * "score": each score is checked independently against the limit, and both sides
- * may not sit on the limit together. "ends": the two ends are a game total and
- * must not exceed the limit. An unknown type imposes no constraint.
- */
-function conditionViolations(condition, values) {
-	const { num, type } = condition;
-	const violations = [];
-
-	if (type === 'score') {
-		for (const field of ['homeScore', 'awayScore']) {
-			if (values[field] > num) {
-				violations.push({ field, message: `Score can't exceed ${num}.` });
-			}
-		}
-		if (values.homeScore === num && values.awayScore === num) {
-			const message = `Both scores can't be ${num}.`;
-			for (const field of ['homeScore', 'awayScore']) {
-				if (!violations.some((violation) => violation.field === field)) {
-					violations.push({ field, message });
-				}
-			}
-		}
-		return violations;
-	}
-
-	if (type === 'ends' && values.homeEnds + values.awayEnds > num) {
-		const message = `Total ends can't exceed ${num}.`;
-		violations.push({ field: 'homeEnds', message });
-		violations.push({ field: 'awayEnds', message });
-	}
-
-	return violations;
-}
-
-/**
- * A team's score can never be less than the number of ends it won, since each
- * won end is worth at least one shot. Checked for both sides independently of
- * any competition condition. Returns { field, message } pairs.
- */
-function scoreEndsViolations(values) {
-	const violations = [];
-
-	for (const side of ['home', 'away']) {
-		const ends = values[`${side}Ends`];
-		if (values[`${side}Score`] < ends) {
-			const message = `Score can't be less than ends won (${ends}).`;
-			violations.push({ field: `${side}Score`, message });
-			violations.push({ field: `${side}Ends`, message });
-		}
-	}
-
-	return violations;
-}
-
-/** Toggle the invalid styling/message on every number input from a key->message map. */
-function applyNumberInvalidMarks(invalidMarks) {
-	for (const input of el.sheetBody.querySelectorAll('input[data-disc-idx]')) {
-		const key = `${input.dataset.discIdx}|${input.dataset.field}`;
-		const message = invalidMarks.get(key);
-		input.classList.toggle('is-invalid', message !== undefined);
-		if (message !== undefined) {
-			input.setAttribute('aria-invalid', 'true');
-			input.title = message;
-		} else {
-			input.removeAttribute('aria-invalid');
-			input.removeAttribute('title');
-		}
-	}
-}
-
 function validateSheet() {
 	let ok = true;
 
 	// "discIdx|field" -> message, for inputs that fail a condition or the score-vs-ends rule.
 	const invalidMarks = new Map();
+
+	const competition = state.draw && state.draw[state.competitionIndex];
+	const conditions = competition ? competition.conditions : null;
 
 	const scores = state.entries.map((entry) => {
 		// position is the original discipline index, so the server can keep scores
@@ -818,7 +747,7 @@ function validateSheet() {
 		}
 
 		if (allPresent) {
-			const condition = conditionFor(entry.name);
+			const condition = conditionFor(conditions, entry.name);
 			const violations = condition ? conditionViolations(condition, result) : [];
 			// Score-vs-ends is a universal rule, so it applies even with no condition.
 			violations.push(...scoreEndsViolations(result));
@@ -830,7 +759,7 @@ function validateSheet() {
 		return result;
 	});
 
-	applyNumberInvalidMarks(invalidMarks);
+	applyInvalidMarks(el.sheetBody, invalidMarks, 'sheetErr-');
 
 	const homePlayers = [];
 	const awayPlayers = [];

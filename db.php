@@ -106,17 +106,52 @@ function ensure_schema(PDO $pdo): void
 			away_ends  INTEGER,
 			UNIQUE(game_id, position)
 		)',
-		'CREATE INDEX IF NOT EXISTS idx_rounds_comp  ON rounds(competition_id, position)',
-		'CREATE INDEX IF NOT EXISTS idx_games_round  ON games(round_id, position)',
-		'CREATE INDEX IF NOT EXISTS idx_players_game ON game_players(game_id, side, position)',
-		'CREATE INDEX IF NOT EXISTS idx_scores_game  ON game_scores(game_id, position)',
+		// Dispute submissions: one row per uploaded scorecard photo. The draw
+		// details are denormalised into the row so the record stays readable
+		// even if the game is later removed, and game_id is a plain reference
+		// (not a cascading FK) so re-seeding the draw does not erase dispute
+		// history while the matching photo files in disputes/ survive.
+		'CREATE TABLE IF NOT EXISTS disputes (
+			id           INTEGER PRIMARY KEY,
+			game_id      INTEGER NOT NULL,
+			competition  TEXT NOT NULL,
+			round_number INTEGER NOT NULL,
+			discipline   TEXT NOT NULL,
+			home_team    TEXT NOT NULL,
+			away_team    TEXT NOT NULL,
+			user_name    TEXT NOT NULL,
+			filename     TEXT NOT NULL,
+			created_at   TEXT NOT NULL
+		)',
+		'CREATE INDEX IF NOT EXISTS idx_rounds_comp    ON rounds(competition_id, position)',
+		'CREATE INDEX IF NOT EXISTS idx_games_round    ON games(round_id, position)',
+		'CREATE INDEX IF NOT EXISTS idx_players_game   ON game_players(game_id, side, position)',
+		'CREATE INDEX IF NOT EXISTS idx_scores_game    ON game_scores(game_id, position)',
+		'CREATE INDEX IF NOT EXISTS idx_disputes_game  ON disputes(game_id)',
+		'CREATE INDEX IF NOT EXISTS idx_disputes_made  ON disputes(created_at)',
 	];
 	foreach ($statements as $sql) {
 		$pdo->exec($sql);
 	}
 
-	$ins = $pdo->prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)');
-	$ins->execute(['schema_version', '1']);
+	// Record the schema version, but only when it actually changes. A plain
+	// INSERT OR IGNORE would be a no-op on an upgraded database (the row already
+	// exists), leaving the stale version in place while the new tables are
+	// created anyway, so the marker would no longer describe the schema.
+	$current = $pdo->query("SELECT value FROM meta WHERE key = 'schema_version'")->fetchColumn();
+	if ($current !== '2') {
+		// One-time import of scorecard photos written before the disputes table
+		// existed (the v1 upload flow only wrote the file). Best-effort and only
+		// attempted during this upgrade, so it can never disturb live rows; a
+		// failure is logged rather than blocking requests.
+		try {
+			backfill_disputes($pdo, __DIR__ . '/disputes');
+		} catch (Throwable $e) {
+			error_log('dispute_backfill_failed: ' . $e->getMessage());
+		}
+		$pdo->prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)')
+			->execute(['schema_version', '2']);
+	}
 }
 
 /**
@@ -462,6 +497,62 @@ function build_game(array $row, array $players, array $scores): array
 }
 
 /**
+ * True when a game has at least one saved score/ends value. A row that exists
+ * with every value NULL (a blank discipline) does not count. This is the single
+ * "has results" gate shared by game_summary() and the admin update path.
+ */
+function game_has_results(PDO $pdo, int $gameId): bool
+{
+	$stmt = $pdo->prepare(
+		'SELECT EXISTS(
+			SELECT 1 FROM game_scores
+			WHERE game_id = ? AND (home_score IS NOT NULL OR away_score IS NOT NULL
+				OR home_ends IS NOT NULL OR away_ends IS NOT NULL)
+		)'
+	);
+	$stmt->execute([$gameId]);
+	return (bool) $stmt->fetchColumn();
+}
+
+/**
+ * True when any game in the round has a saved result. Drives the round-date
+ * guard: a round's date may only be edited while it holds no results anywhere.
+ */
+function round_has_results(PDO $pdo, int $roundId): bool
+{
+	$stmt = $pdo->prepare(
+		'SELECT EXISTS(
+			SELECT 1 FROM game_scores s
+			JOIN games g ON g.id = s.game_id
+			WHERE g.round_id = ? AND (s.home_score IS NOT NULL OR s.away_score IS NOT NULL
+				OR s.home_ends IS NOT NULL OR s.away_ends IS NOT NULL)
+		)'
+	);
+	$stmt->execute([$roundId]);
+	return (bool) $stmt->fetchColumn();
+}
+
+/**
+ * The score positions in a game that already carry a result, as
+ * position => true. The admin update path uses this to refuse an edit that
+ * blanks a discipline holding a stored result.
+ */
+function game_result_positions(PDO $pdo, int $gameId): array
+{
+	$stmt = $pdo->prepare(
+		'SELECT position FROM game_scores
+		 WHERE game_id = ? AND (home_score IS NOT NULL OR away_score IS NOT NULL
+			OR home_ends IS NOT NULL OR away_ends IS NOT NULL)'
+	);
+	$stmt->execute([$gameId]);
+	$positions = [];
+	foreach ($stmt->fetchAll() as $row) {
+		$positions[(int) $row['position']] = true;
+	}
+	return $positions;
+}
+
+/**
  * Resolve the details needed to name a dispute photo, plus whether the game has
  * any saved results. Returns null when the game id is unknown.
  */
@@ -481,22 +572,152 @@ function game_summary(PDO $pdo, int $gameId): ?array
 		return null;
 	}
 
-	$hasStmt = $pdo->prepare(
-		'SELECT EXISTS(
-			SELECT 1 FROM game_scores
-			WHERE game_id = ? AND (home_score IS NOT NULL OR away_score IS NOT NULL
-				OR home_ends IS NOT NULL OR away_ends IS NOT NULL)
-		)'
-	);
-	$hasStmt->execute([$gameId]);
-
 	return [
 		'competition' => (string) $row['competition'],
 		'round'       => (int) $row['round'],
 		'homeTeam'    => (string) $row['homeTeam'],
 		'awayTeam'    => (string) $row['awayTeam'],
-		'hasResults'  => (bool) $hasStmt->fetchColumn(),
+		'hasResults'  => game_has_results($pdo, $gameId),
 	];
+}
+
+/**
+ * The discipline/condition context a game's results must satisfy: the ordered
+ * discipline names for its competition, plus that competition's conditions.
+ * Returns null when the game id is unknown.
+ */
+function game_validation_context(PDO $pdo, int $gameId): ?array
+{
+	$stmt = $pdo->prepare(
+		'SELECT r.competition_id AS comp
+		 FROM games g JOIN rounds r ON r.id = g.round_id
+		 WHERE g.id = ?'
+	);
+	$stmt->execute([$gameId]);
+	$row = $stmt->fetch();
+	if ($row === false) { return null; }
+
+	$d = $pdo->prepare('SELECT position, name FROM competition_disciplines WHERE competition_id = ? ORDER BY position, id');
+	$d->execute([(int) $row['comp']]);
+	$disciplines = []; // position => lowercased name
+	foreach ($d->fetchAll() as $r) {
+		$disciplines[(int) $r['position']] = strtolower((string) $r['name']);
+	}
+
+	$c = $pdo->prepare('SELECT discipline, num, type FROM competition_conditions WHERE competition_id = ?');
+	$c->execute([(int) $row['comp']]);
+	$conditions = [];
+	foreach ($c->fetchAll() as $r) {
+		$conditions[strtolower((string) $r['discipline'])] = ['num' => (int) $r['num'], 'type' => strtolower((string) $r['type'])];
+	}
+	return ['disciplines' => $disciplines, 'conditions' => $conditions];
+}
+
+/**
+ * Server-side mirror of the client rules in app.js/results.js
+ * (conditionViolations + scoreEndsViolations). Only disciplines that carry a
+ * complete submitted result are validated: an absent row, or one with any blank
+ * value, is legacy/partial data the clients cannot produce, and rejecting it
+ * would deadlock saves of such games (the inline editor is hidden once a game
+ * has any result). Complete results are still fully checked: each side's score
+ * must be >= its ends, and the competition condition is applied ("score": each
+ * side <= num and both sides may not equal num together; "ends":
+ * homeEnds + awayEnds <= num). Returns a list of error strings (empty = valid).
+ * The rules here MUST stay in sync with the two JS copies.
+ */
+function validate_game(PDO $pdo, int $gameId, array $game): array
+{
+	$ctx = game_validation_context($pdo, $gameId);
+	if ($ctx === null) { return ['game_not_found']; }
+
+	// Index submitted scores by position; a negative/non-integer position is a
+	// malformed payload.
+	$byPos = [];
+	$submitted = (isset($game['scores']) && is_array($game['scores'])) ? $game['scores'] : [];
+	foreach ($submitted as $entry) {
+		if (!is_array($entry)) { continue; }
+		$pos = filter_int($entry['position'] ?? null);
+		if ($pos === null || $pos < 0) { return ['bad_scores']; }
+		$byPos[$pos] = $entry;
+	}
+
+	$errors = [];
+	foreach ($ctx['disciplines'] as $pos => $name) {
+		if (!in_array($name, ['singles', 'pairs', 'triples', 'fours'], true)) { continue; }
+		$entry = $byPos[$pos] ?? null;
+		if ($entry === null) { continue; } // no row for this discipline — nothing to validate
+		$vals = [];
+		foreach (['homeScore', 'awayScore', 'homeEnds', 'awayEnds'] as $f) {
+			$vals[$f] = score_value($entry[$f] ?? null);
+		}
+		if (in_array(null, $vals, true)) { continue; } // partial/blank result — do not block a save
+
+		// score >= ends, both sides
+		foreach (['home', 'away'] as $side) {
+			if ($vals[$side . 'Score'] < $vals[$side . 'Ends']) { $errors[] = "score_lt_ends:{$name}:{$side}"; }
+		}
+		// competition condition
+		$cond = $ctx['conditions'][$name] ?? null;
+		if ($cond !== null) {
+			if ($cond['type'] === 'score') {
+				if ($vals['homeScore'] > $cond['num']) { $errors[] = "score_over:{$name}:home"; }
+				if ($vals['awayScore'] > $cond['num']) { $errors[] = "score_over:{$name}:away"; }
+				if ($vals['homeScore'] === $cond['num'] && $vals['awayScore'] === $cond['num']) { $errors[] = "score_both_max:{$name}"; }
+			} elseif ($cond['type'] === 'ends' && ($vals['homeEnds'] + $vals['awayEnds']) > $cond['num']) {
+				$errors[] = "ends_over:{$name}";
+			}
+		}
+	}
+	return $errors;
+}
+
+/**
+ * Every recorded dispute, newest first. Read-only. The stored game details
+ * (competition/round/teams) are denormalised copies taken when the photo was
+ * uploaded, so callers must resolve game_id against the current draw rather
+ * than trusting them: after a re-seed the ids restart (INTEGER PRIMARY KEY)
+ * and a stored game_id can silently point at a *different* game. Ordering by
+ * created_at then id keeps same-second rows stable (created_at has only
+ * second resolution).
+ */
+function load_disputes(PDO $pdo): array
+{
+	$rows = $pdo->query(
+		'SELECT id, game_id, competition, round_number, discipline, home_team,
+		        away_team, user_name, filename, created_at
+		 FROM disputes
+		 ORDER BY created_at DESC, id DESC'
+	)->fetchAll();
+
+	$out = [];
+	foreach ($rows as $row) {
+		$out[] = [
+			'id'           => (int) $row['id'],
+			'game_id'      => (int) $row['game_id'],
+			'competition'  => (string) $row['competition'],
+			'round_number' => (int) $row['round_number'],
+			'discipline'   => (string) $row['discipline'],
+			'home_team'    => (string) $row['home_team'],
+			'away_team'    => (string) $row['away_team'],
+			'user_name'    => (string) $row['user_name'],
+			'filename'     => (string) $row['filename'],
+			'created_at'   => (string) $row['created_at'],
+		];
+	}
+	return $out;
+}
+
+/**
+ * The stored photo filename for one dispute id, or null when the id is unknown.
+ * Used by the admin-only image endpoint, which re-validates the name before
+ * reading from disputes/.
+ */
+function dispute_filename(PDO $pdo, int $id): ?string
+{
+	$stmt = $pdo->prepare('SELECT filename FROM disputes WHERE id = ?');
+	$stmt->execute([$id]);
+	$row = $stmt->fetch();
+	return $row === false ? null : (string) $row['filename'];
 }
 
 // ---------------------------------------------------------------------------
@@ -564,8 +785,15 @@ function insert_game_scores(PDO $pdo, int $gameId, array $game): void
  * beginTransaction(), which emits a deferred BEGIN) so the revision read and
  * the write are one atomic step: a concurrent writer cannot read the stale
  * revision before this one commits.
+ *
+ * Team names are immutable here: a save bumps the revision, refreshes the
+ * players/scores, and never rewrites home_team/away_team (the fixture identity
+ * is fixed by the draw). The game's players and scores are fully replaced.
+ *
+ * The return type is left untyped because the server runs PHP 7.4, which does
+ * not support union type declarations (int|string).
  */
-function save_game(PDO $pdo, int $gameId, int $revision, array $game): int|string
+function save_game(PDO $pdo, int $gameId, int $revision, array $game)
 {
 	$pdo->exec('BEGIN IMMEDIATE');
 	try {
@@ -582,12 +810,10 @@ function save_game(PDO $pdo, int $gameId, int $revision, array $game): int|strin
 		}
 
 		$upd = $pdo->prepare(
-			'UPDATE games SET home_team = ?, away_team = ?, revision = revision + 1, updated_at = ?
+			'UPDATE games SET revision = revision + 1, updated_at = ?
 			 WHERE id = ?'
 		);
 		$upd->execute([
-			$game['homeTeam'] ?? '',
-			$game['awayTeam'] ?? '',
 			date('Y-m-d H:i:s'),
 			$gameId,
 		]);
@@ -603,6 +829,412 @@ function save_game(PDO $pdo, int $gameId, int $revision, array $game): int|strin
 		$pdo->exec('ROLLBACK');
 		throw $e;
 	}
+}
+
+/**
+ * Admin-only write path for one game from the results page. Unlike the public
+ * save_game() it may also rewrite the teams and the round's date, but only
+ * while nothing has been scored:
+ *   - a game that already has results: a supplied team or round-date change is
+ *     rejected (returns 'teams_locked'); players/scores are still replaced;
+ *   - a resultless game: home_team/away_team are written, and the round date is
+ *     written only when $roundDate !== null and the round still has no results.
+ *     A date that actually changes while the round has a result is rejected
+ *     (returns 'date_locked') rather than silently dropped.
+ * The per-game optimistic lock is the same BEGIN IMMEDIATE + revision check as
+ * save_game() (see its comment for why the lock is immediate). Returns the new
+ * revision, or 'not_found' / 'conflict' / 'teams_locked' / 'date_locked'.
+ *
+ * The return type is left untyped because the server runs PHP 7.4, which does
+ * not support union type declarations (int|string).
+ */
+function update_game(PDO $pdo, int $gameId, int $revision, array $game, ?string $roundDate)
+{
+	$pdo->exec('BEGIN IMMEDIATE');
+	try {
+		$stmt = $pdo->prepare(
+			'SELECT g.revision, g.home_team, g.away_team, g.round_id, r.date AS round_date
+			 FROM games g
+			 JOIN rounds r ON r.id = g.round_id
+			 WHERE g.id = ?'
+		);
+		$stmt->execute([$gameId]);
+		$row = $stmt->fetch();
+		if ($row === false) {
+			$pdo->exec('ROLLBACK');
+			return 'not_found';
+		}
+		if ((int) $row['revision'] !== $revision) {
+			$pdo->exec('ROLLBACK');
+			return 'conflict';
+		}
+
+		$roundId = (int) $row['round_id'];
+
+		if (game_has_results($pdo, $gameId)) {
+			// Teams and date are fixed once a result exists: report a change
+			// rather than quietly ignoring it.
+			$homeTeam = cap_str($game['homeTeam'] ?? '', 120);
+			$awayTeam = cap_str($game['awayTeam'] ?? '', 120);
+			if ($homeTeam !== (string) $row['home_team'] || $awayTeam !== (string) $row['away_team']
+				|| $roundDate !== null) {
+				$pdo->exec('ROLLBACK');
+				return 'teams_locked';
+			}
+		} else {
+			// Resultless game: the teams and (guard permitting) the round date
+			// are editable. Only a real date change is guarded, so re-sending the
+			// unchanged value is never rejected.
+			$pdo->prepare('UPDATE games SET home_team = ?, away_team = ? WHERE id = ?')->execute([
+				cap_str($game['homeTeam'] ?? '', 120),
+				cap_str($game['awayTeam'] ?? '', 120),
+				$gameId,
+			]);
+
+			if ($roundDate !== null) {
+				$newDate = cap_str($roundDate, 40);
+				$newDate = $newDate === '' ? null : $newDate;
+				$currentDate = $row['round_date'] === null ? null : (string) $row['round_date'];
+				if ($newDate !== $currentDate) {
+					if (round_has_results($pdo, $roundId)) {
+						$pdo->exec('ROLLBACK');
+						return 'date_locked';
+					}
+					$pdo->prepare('UPDATE rounds SET date = ? WHERE id = ?')->execute([$newDate, $roundId]);
+				}
+			}
+		}
+
+		$pdo->prepare('UPDATE games SET revision = revision + 1, updated_at = ? WHERE id = ?')
+			->execute([date('Y-m-d H:i:s'), $gameId]);
+
+		$pdo->prepare('DELETE FROM game_players WHERE game_id = ?')->execute([$gameId]);
+		$pdo->prepare('DELETE FROM game_scores WHERE game_id = ?')->execute([$gameId]);
+		insert_game_players($pdo, $gameId, $game);
+		insert_game_scores($pdo, $gameId, $game);
+
+		$pdo->exec('COMMIT');
+		return $revision + 1;
+	} catch (Throwable $e) {
+		$pdo->exec('ROLLBACK');
+		throw $e;
+	}
+}
+
+/**
+ * Admin-only reset of one game from the results page: removes the game's scores
+ * and players, leaving the fixture (with its teams and round) in place. This is
+ * the one path that may erase a stored result — the client confirms before
+ * calling it, and no score rules apply since nothing is written back.
+ *
+ * The per-game optimistic lock is the same BEGIN IMMEDIATE + revision check as
+ * save_game()/update_game() (see their comments for why the lock is immediate),
+ * so a reset cannot race a concurrent save. Returns the new revision, or
+ * 'not_found' / 'conflict'.
+ *
+ * The return type is left untyped because the server runs PHP 7.4, which does
+ * not support union type declarations (int|string).
+ */
+function reset_game(PDO $pdo, int $gameId, int $revision)
+{
+	$pdo->exec('BEGIN IMMEDIATE');
+	try {
+		$stmt = $pdo->prepare('SELECT revision FROM games WHERE id = ?');
+		$stmt->execute([$gameId]);
+		$row = $stmt->fetch();
+		if ($row === false) {
+			$pdo->exec('ROLLBACK');
+			return 'not_found';
+		}
+		if ((int) $row['revision'] !== $revision) {
+			$pdo->exec('ROLLBACK');
+			return 'conflict';
+		}
+
+		$pdo->prepare('UPDATE games SET revision = revision + 1, updated_at = ? WHERE id = ?')
+			->execute([date('Y-m-d H:i:s'), $gameId]);
+		$pdo->prepare('DELETE FROM game_players WHERE game_id = ?')->execute([$gameId]);
+		$pdo->prepare('DELETE FROM game_scores WHERE game_id = ?')->execute([$gameId]);
+
+		$pdo->exec('COMMIT');
+		return $revision + 1;
+	} catch (Throwable $e) {
+		$pdo->exec('ROLLBACK');
+		throw $e;
+	}
+}
+
+/**
+ * Append one fixture to an existing round with no players or scores. The round
+ * is verified first (an unknown id throws RuntimeException('round_not_found'))
+ * and the position is one past the round's current maximum (0 when the round is
+ * empty). BEGIN IMMEDIATE serialises concurrent adds, so the MAX(position)
+ * read and the insert are one step and cannot collide on UNIQUE(round_id,
+ * position); a caller that loses a race waits on the lock rather than failing.
+ * Returns the new game id.
+ */
+function insert_game(PDO $pdo, int $roundId, string $homeTeam, string $awayTeam): int
+{
+	$check = $pdo->prepare('SELECT 1 FROM rounds WHERE id = ?');
+	$check->execute([$roundId]);
+	if ($check->fetchColumn() === false) {
+		throw new RuntimeException('round_not_found');
+	}
+
+	$pdo->exec('BEGIN IMMEDIATE');
+	try {
+		$pos = $pdo->prepare('SELECT COALESCE(MAX(position), -1) + 1 FROM games WHERE round_id = ?');
+		$pos->execute([$roundId]);
+		$position = (int) $pos->fetchColumn();
+
+		$ins = $pdo->prepare(
+			'INSERT INTO games (round_id, home_team, away_team, position) VALUES (?, ?, ?, ?)'
+		);
+		$ins->execute([$roundId, cap_str($homeTeam, 120), cap_str($awayTeam, 120), $position]);
+		$id = (int) $pdo->lastInsertId();
+
+		$pdo->exec('COMMIT');
+		return $id;
+	} catch (Throwable $e) {
+		$pdo->exec('ROLLBACK');
+		throw $e;
+	}
+}
+
+/**
+ * Record one uploaded dispute. Takes the game details already resolved by
+ * game_summary() (competition, round, teams) plus the stored photo filename, and
+ * denormalises them into the row so the record is self-describing. Returns the
+ * new dispute id. Not wrapped in its own transaction: the caller writes the
+ * photo file first, then records it here, so a failure here leaves the photo in
+ * place rather than a row pointing at a file that was never written.
+ */
+function insert_dispute(
+	PDO $pdo,
+	int $gameId,
+	string $userName,
+	string $discipline,
+	array $summary,
+	string $filename
+): int {
+	$stmt = $pdo->prepare(
+		'INSERT INTO disputes
+			(game_id, competition, round_number, discipline, home_team, away_team, user_name, filename, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	);
+	$stmt->execute([
+		$gameId,
+		$summary['competition'],
+		$summary['round'],
+		strtolower(cap_str($discipline, 40)),
+		$summary['homeTeam'],
+		$summary['awayTeam'],
+		$userName,
+		$filename,
+		date('Y-m-d H:i:s'),
+	]);
+	return (int) $pdo->lastInsertId();
+}
+
+/**
+ * Delete one recorded dispute and return its stored photo filename, or null
+ * when the id is unknown. The row is removed inside its own write transaction
+ * and the filename it named is returned so the caller can also remove the photo
+ * from disputes/; the two are separate steps because the file lives outside the
+ * database, and a row gone with a leftover file is harmless (the file is never
+ * listed once the row is gone).
+ */
+function delete_dispute(PDO $pdo, int $id): ?string
+{
+	$pdo->exec('BEGIN IMMEDIATE');
+	try {
+		$stmt = $pdo->prepare('SELECT filename FROM disputes WHERE id = ?');
+		$stmt->execute([$id]);
+		$row = $stmt->fetch();
+		if ($row === false) {
+			$pdo->exec('ROLLBACK');
+			return null;
+		}
+		$pdo->prepare('DELETE FROM disputes WHERE id = ?')->execute([$id]);
+		$pdo->exec('COMMIT');
+		return (string) $row['filename'];
+	} catch (Throwable $e) {
+		$pdo->exec('ROLLBACK');
+		throw $e;
+	}
+}
+
+/**
+ * One-time, best-effort import of scorecard photos written to disputes/ before
+ * the disputes table existed. Idempotent: it does nothing unless the table is
+ * empty (and it is only called during the schema-1 -> 2 upgrade). Each filename
+ * is parsed and resolved against the current draw by slugged competition, round
+ * and teams; a resolved file adopts the draw's real names (so it stays editable
+ * in results.php), while an unresolved file is still listed with game_id 0 and
+ * de-slugged names (shown read-only). Files that do not match the naming shape
+ * are skipped and logged. Returns the number of rows inserted.
+ */
+function backfill_disputes(PDO $pdo, string $dir): int
+{
+	if (!is_dir($dir)) {
+		return 0;
+	}
+	// Never merge into a populated table (guards a re-run before the version
+	// marker is written).
+	$count = (int) $pdo->query('SELECT COUNT(*) FROM disputes')->fetchColumn();
+	if ($count > 0) {
+		return 0;
+	}
+	$files = glob($dir . '/dispute_*.jpg');
+	if ($files === false || !$files) {
+		return 0;
+	}
+
+	// Index the current draw by slugged identity so a filename resolves back to
+	// a real game (and its real, un-slugged names).
+	$games = $pdo->query(
+		'SELECT g.id, g.home_team, g.away_team, r.round_number, c.name AS competition
+		 FROM games g
+		 JOIN rounds r       ON r.id = g.round_id
+		 JOIN competitions c ON c.id = r.competition_id'
+	)->fetchAll();
+	$index = [];
+	foreach ($games as $game) {
+		$key = sanitise_slug($game['competition']) . '|' . (int) $game['round_number']
+			. '|' . sanitise_slug($game['home_team']) . '|' . sanitise_slug($game['away_team']);
+		// First match wins; competition + round + both teams is specific enough.
+		if (!isset($index[$key])) {
+			$index[$key] = $game;
+		}
+	}
+
+	$insert = $pdo->prepare(
+		'INSERT INTO disputes
+			(game_id, competition, round_number, discipline, home_team, away_team, user_name, filename, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	);
+
+	$inserted = 0;
+	foreach ($files as $path) {
+		if (is_link($path) || !is_file($path)) {
+			continue;
+		}
+		$name = basename($path);
+		$parsed = parse_dispute_filename($name);
+		if ($parsed === null) {
+			error_log('dispute_backfill_skipped: ' . $name);
+			continue;
+		}
+
+		$key = $parsed['comp_slug'] . '|' . $parsed['round']
+			. '|' . $parsed['home_slug'] . '|' . $parsed['away_slug'];
+		$game = $index[$key] ?? null;
+
+		if ($game !== null) {
+			$gameId = (int) $game['id'];
+			$competition = (string) $game['competition'];
+			$round = (int) $game['round_number'];
+			$home = (string) $game['home_team'];
+			$away = (string) $game['away_team'];
+		} else {
+			// Unresolved: keep the photo visible read-only; de-slug for display.
+			$gameId = 0;
+			$competition = str_replace('-', ' ', $parsed['comp_slug']);
+			$round = $parsed['round'];
+			$home = str_replace('-', ' ', $parsed['home_slug']);
+			$away = str_replace('-', ' ', $parsed['away_slug']);
+		}
+
+		$insert->execute([
+			$gameId,
+			$competition,
+			$round,
+			strtolower($parsed['discipline_slug']),
+			$home,
+			$away,
+			$parsed['scorer_slug'],
+			$name,
+			$parsed['created_at'],
+		]);
+		$inserted++;
+	}
+	return $inserted;
+}
+
+/**
+ * Parse a stored dispute filename back into its parts. Mirrors the shape
+ * build_dispute_filename() produces:
+ *   dispute_<scorer>_<competition>_R<round>_[<discipline>_]<home>-vs-<away>_<Ymd-His>.jpg
+ * Underscores inside a slug make the split heuristic rather than exact, so this
+ * is only used for the one-off backfill of pre-existing photos; returns null
+ * when the name does not match.
+ */
+function parse_dispute_filename(string $name): ?array
+{
+	if (!preg_match('/^dispute_(.+)\.jpg$/', $name, $m)) {
+		return null;
+	}
+	$stem = $m[1];
+
+	// Strip the trailing timestamp, then the "<home>-vs-<away>" segment.
+	$pos = strrpos($stem, '_');
+	if ($pos === false) {
+		return null;
+	}
+	$timestamp = substr($stem, $pos + 1);
+	$stem = substr($stem, 0, $pos);
+
+	$pos = strrpos($stem, '_');
+	if ($pos === false) {
+		return null;
+	}
+	$teams = substr($stem, $pos + 1);
+	$stem = substr($stem, 0, $pos);
+
+	$vs = strpos($teams, '-vs-');
+	if ($vs === false) {
+		return null;
+	}
+	$homeSlug = substr($teams, 0, $vs);
+	$awaySlug = substr($teams, $vs + strlen('-vs-'));
+
+	// "<scorer>_<competition>_R<round>[_<discipline>]".
+	$parts = explode('_', $stem);
+	$roundIndex = -1;
+	foreach ($parts as $i => $part) {
+		if (preg_match('/^R\d+$/', $part)) {
+			$roundIndex = $i;
+			break;
+		}
+	}
+	if ($roundIndex < 1) {
+		return null;
+	}
+
+	$createdAt = parse_dispute_timestamp($timestamp);
+	if ($createdAt === null) {
+		return null;
+	}
+
+	return [
+		'comp_slug'       => implode('_', array_slice($parts, 1, $roundIndex - 1)),
+		'round'           => (int) substr($parts[$roundIndex], 1),
+		'home_slug'       => $homeSlug,
+		'away_slug'       => $awaySlug,
+		'discipline_slug' => implode('_', array_slice($parts, $roundIndex + 1)),
+		'scorer_slug'     => $parts[0],
+		'created_at'      => $createdAt,
+	];
+}
+
+/** `Ymd-His` -> `Y-m-d H:i:s`, or null when the value does not round-trip. */
+function parse_dispute_timestamp(string $ts): ?string
+{
+	$dt = DateTime::createFromFormat('Ymd-His', $ts);
+	if ($dt === false || $dt->format('Ymd-His') !== $ts) {
+		return null;
+	}
+	return $dt->format('Y-m-d H:i:s');
 }
 
 /** Pretty JSON export of the whole draw, for backups and the CLI. */
@@ -685,6 +1317,19 @@ function score_value($value): ?int
 function sanitise_user($value): string
 {
 	return sanitise_slug($value, 40);
+}
+
+/**
+ * Normalise a human display name for storage: preserve spaces/case, strip
+ * control characters and collapse runs of whitespace, cap the length, and fall
+ * back to "unknown". Distinct from sanitise_user(), which slugs for filenames.
+ */
+function sanitise_display_name($value): string
+{
+	$name = cap_str($value, 60);
+	$name = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $name) ?? '';
+	$name = trim($name);
+	return $name === '' ? 'unknown' : $name;
 }
 
 /**

@@ -10,6 +10,8 @@ function asset_url(string $file): string
 	$version = @filemtime($path) ?: time();
 	return $file . '?v=' . $version;
 }
+
+require __DIR__ . '/security.php';   // shared hardening headers (CSP, X-Frame-Options, …)
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -17,6 +19,7 @@ function asset_url(string $file): string
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 	<title>Ellesmere Interclub Score Sheet</title>
+	<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%231f6feb'/%3E%3C/svg%3E" />
 	<link rel="stylesheet" href="<?= asset_url('styles.css') ?>" />
 </head>
 <body>
@@ -26,6 +29,7 @@ function asset_url(string $file): string
 	</div>
 
 	<main class="page">
+		<h1 class="sr-only">Ellesmere Interclub Score Sheet</h1>
 		<section class="selectors" aria-label="Fixture selection">
 			<label class="field">
 				<span class="field__label">Competition</span>
@@ -118,6 +122,7 @@ function asset_url(string $file): string
 		</div>
 	</dialog>
 
+	<script src="<?= asset_url('validation.js') ?>"></script>
 	<script src="<?= asset_url('app.js') ?>"></script>
 </body>
 </html>

@@ -1,7 +1,11 @@
 .history/*
+!.history/.htaccess
 backups/*
+!backups/.htaccess
 disputes/*
 !disputes/.gitkeep
+!disputes/.htaccess
+!.kilo/.htaccess
 # Live SQLite database (draw.json stays tracked as the seed)
 draw.sqlite
 draw.sqlite-wal
