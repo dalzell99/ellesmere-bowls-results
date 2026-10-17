@@ -303,6 +303,41 @@ select:disabled {
 	width: 33%;
 }
 
+/* Player name suggestions: a custom dropdown (not <datalist>) so it can be
+   capped to the visible space on a phone and stay clear of the keyboard. */
+.player-suggestions {
+	position: absolute;
+	z-index: 1000;
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+	background: #fff;
+	border: 1px solid #8a8a8a;
+	border-radius: 4px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+.player-suggestions[hidden] {
+	display: none;
+}
+
+.player-suggestions__option {
+	padding: 0.55rem 0.65rem;
+	line-height: 1.25;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	cursor: pointer;
+}
+
+.player-suggestions__option + .player-suggestions__option {
+	border-top: 1px solid #e2e2e2;
+}
+
+.player-suggestions__option.is-active,
+.player-suggestions__option:hover {
+	background: var(--player-input-bg);
+}
+
 /* -------------------------------------------------------------- actions */
 
 .sheet__actions {

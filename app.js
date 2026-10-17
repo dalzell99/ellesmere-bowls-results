@@ -223,6 +223,15 @@ function bindStaticEvents() {
 	// Warn before reloading/closing with unsaved changes rather than silently
 	// writing a draft (which would resurrect a discarded draft on every reload).
 	window.addEventListener('beforeunload', onBeforeUnload);
+
+	// Keep the player suggestion list anchored when the page or on-screen
+	// keyboard scrolls/resizes the viewport.
+	window.addEventListener('scroll', repositionOpenSuggestions, true);
+	window.addEventListener('resize', repositionOpenSuggestions);
+	if (window.visualViewport) {
+		window.visualViewport.addEventListener('resize', repositionOpenSuggestions);
+		window.visualViewport.addEventListener('scroll', repositionOpenSuggestions);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +501,7 @@ function renderSheet() {
 	// Snapshot what the sheet now shows, so later edits can be detected.
 	state.baseline = sheetSnapshot();
 
-	refreshDatalists(game.homeTeam, game.awayTeam);
+	refreshPlayerSuggestions(game.homeTeam, game.awayTeam);
 
 	el.sheet.hidden = false;
 	el.emptyState.hidden = true;
@@ -637,13 +646,16 @@ function playerCell(side, index, value, team) {
 	input.type = 'text';
 	input.maxLength = 60;
 	input.autocomplete = 'off';
-	input.setAttribute('list', side === 'home' ? 'players-home' : 'players-away');
+	input.setAttribute('role', 'combobox');
+	input.setAttribute('aria-autocomplete', 'list');
+	input.setAttribute('aria-expanded', 'false');
 	input.setAttribute('aria-label', `${team || ''} player ${index + 1}`.trim());
 	input.dataset.playerSide = side;
 	input.dataset.playerIndex = String(index);
 	if (value != null && value !== '') {
 		input.value = String(value);
 	}
+	bindPlayerSuggestions(input);
 	td.appendChild(input);
 	return td;
 }
@@ -662,49 +674,332 @@ function findPlayerInput(side, index) {
 
 // ---------------------------------------------------------------------------
 // Player autocomplete options
+//
+// A custom dropdown replaces <datalist>: on phones the native list opens over
+// the on-screen keyboard, which makes it hard to type a name that is not in the
+// list. This dropdown stays anchored to the field, caps itself to the space
+// available above/below it, and never takes focus away from the input.
 // ---------------------------------------------------------------------------
 
-function refreshDatalists(homeTeam, awayTeam) {
-	setDatalist('players-home', collectTeamPlayers(homeTeam));
-	setDatalist('players-away', collectTeamPlayers(awayTeam));
+const PLAYER_SUGGESTION_LIMIT = 6;
+const PLAYER_SUGGESTION_MIN_HEIGHT = 96;
+const PLAYER_SUGGESTION_MAX_HEIGHT = 220;
+
+let playerSuggestions = { home: [], away: [] };
+let suggestionList = null;
+let suggestionInput = null;
+let suggestionActiveIndex = -1;
+let suggestionTouch = null; // active touch drag: { startY, startScrollTop, moved }
+
+function refreshPlayerSuggestions(homeTeam, awayTeam) {
+	// Only offer names from the selected competition: the same team name can
+	// appear in several competitions with different squads.
+	const competition = state.draw && state.draw[state.competitionIndex];
+	playerSuggestions = {
+		home: collectTeamPlayers(competition, homeTeam),
+		away: collectTeamPlayers(competition, awayTeam),
+	};
+	hidePlayerSuggestions();
 }
 
-function setDatalist(id, names) {
-	let list = document.getElementById(id);
-	if (!list) {
-		list = document.createElement('datalist');
-		list.id = id;
-		document.body.appendChild(list);
+function isCoarsePointer() {
+	return typeof window.matchMedia === 'function'
+		&& window.matchMedia('(pointer: coarse)').matches;
+}
+
+function bindPlayerSuggestions(input) {
+	input.addEventListener('focus', () => showPlayerSuggestions(input));
+	input.addEventListener('input', () => showPlayerSuggestions(input));
+	input.addEventListener('blur', () => {
+		// A touch on the list can briefly blur the input on some mobile
+		// browsers; keep the list alive until the tap/drag has finished.
+		if (suggestionTouch) {
+			return;
+		}
+		hidePlayerSuggestions();
+	});
+	input.addEventListener('keydown', onPlayerSuggestionKeydown);
+}
+
+function ensureSuggestionList() {
+	if (suggestionList) {
+		return suggestionList;
 	}
+	suggestionList = document.createElement('div');
+	suggestionList.className = 'player-suggestions';
+	suggestionList.id = 'playerSuggestions';
+	suggestionList.setAttribute('role', 'listbox');
+	suggestionList.hidden = true;
+	// Mouse/pen: select on pointerdown so the input keeps focus. Touch is
+	// handled below so a drag can scroll the list without selecting a name.
+	suggestionList.addEventListener('pointerdown', (event) => {
+		if (event.pointerType === 'touch') {
+			return;
+		}
+		const optionEl = event.target.closest('.player-suggestions__option');
+		if (!optionEl) {
+			return;
+		}
+		event.preventDefault();
+		choosePlayerSuggestion(optionEl.dataset.value);
+	});
+	// Keep focus (and the keyboard) on the input while the list is touched,
+	// then scroll the list manually so dragging does not select a name.
+	suggestionList.addEventListener('touchstart', (event) => {
+		if (event.touches.length !== 1) {
+			suggestionTouch = null;
+			return;
+		}
+		suggestionTouch = {
+			startY: event.touches[0].clientY,
+			startScrollTop: suggestionList.scrollTop,
+			moved: false,
+		};
+		event.preventDefault();
+	}, { passive: false });
+	suggestionList.addEventListener('touchmove', (event) => {
+		if (!suggestionTouch || event.touches.length !== 1) {
+			return;
+		}
+		const delta = event.touches[0].clientY - suggestionTouch.startY;
+		if (Math.abs(delta) > 8) {
+			suggestionTouch.moved = true;
+		}
+		suggestionList.scrollTop = suggestionTouch.startScrollTop - delta;
+		event.preventDefault();
+	}, { passive: false });
+	suggestionList.addEventListener('touchend', (event) => {
+		const touch = suggestionTouch;
+		suggestionTouch = null;
+		// Some mobile browsers close the keyboard while the list is touched;
+		// put focus back so typing can continue after a scroll.
+		if (suggestionInput && document.activeElement !== suggestionInput) {
+			suggestionInput.focus();
+		}
+		if (!touch || touch.moved) {
+			return;
+		}
+		const optionEl = event.target.closest('.player-suggestions__option');
+		if (optionEl) {
+			event.preventDefault();
+			choosePlayerSuggestion(optionEl.dataset.value);
+		}
+	}, { passive: false });
+	suggestionList.addEventListener('touchcancel', () => {
+		suggestionTouch = null;
+	});
+	// Keyboard/assistive activation may dispatch a plain click instead.
+	suggestionList.addEventListener('click', (event) => {
+		const optionEl = event.target.closest('.player-suggestions__option');
+		if (optionEl) {
+			choosePlayerSuggestion(optionEl.dataset.value);
+		}
+	});
+	document.body.appendChild(suggestionList);
+	return suggestionList;
+}
+
+/** Names currently entered in the other player inputs, lower-cased. */
+function usedPlayerNames(excludeInput) {
+	const used = new Set();
+	const inputs = el.sheetBody.querySelectorAll('input[data-player-side]');
+	inputs.forEach((input) => {
+		if (input === excludeInput) {
+			return;
+		}
+		const name = input.value.trim().toLowerCase();
+		if (name) {
+			used.add(name);
+		}
+	});
+	return used;
+}
+
+function showPlayerSuggestions(input) {
+	const query = input.value.trim().toLowerCase();
+	const names = playerSuggestions[input.dataset.playerSide] || [];
+	// A player can only fill one slot, so hide names already used elsewhere on
+	// the sheet (home or away) from the other dropdowns.
+	const used = usedPlayerNames(input);
+	const matches = names
+		.filter((name) => {
+			const lower = name.toLowerCase();
+			return lower !== query && lower.indexOf(query) !== -1 && !used.has(lower);
+		})
+		.slice(0, PLAYER_SUGGESTION_LIMIT);
+	if (!matches.length) {
+		hidePlayerSuggestions();
+		return;
+	}
+
+	const list = ensureSuggestionList();
+	if (suggestionInput && suggestionInput !== input) {
+		suggestionInput.setAttribute('aria-expanded', 'false');
+		suggestionInput.removeAttribute('aria-activedescendant');
+	}
+	suggestionInput = input;
+	suggestionActiveIndex = -1;
+
 	list.textContent = '';
-	for (const name of names) {
-		list.appendChild(option(name, name));
+	matches.forEach((name, index) => {
+		const optionEl = document.createElement('div');
+		optionEl.className = 'player-suggestions__option';
+		optionEl.id = `playerSuggestion${index}`;
+		optionEl.dataset.value = name;
+		optionEl.setAttribute('role', 'option');
+		optionEl.setAttribute('aria-selected', 'false');
+		optionEl.textContent = name;
+		list.appendChild(optionEl);
+	});
+
+	list.hidden = false;
+	input.setAttribute('aria-expanded', 'true');
+	input.setAttribute('aria-controls', list.id);
+	input.removeAttribute('aria-activedescendant');
+	positionSuggestionList(input);
+}
+
+/** Anchor the list to the input, preferring the space above it on phones. */
+function positionSuggestionList(input) {
+	const list = ensureSuggestionList();
+	const rect = input.getBoundingClientRect();
+	const viewport = window.visualViewport;
+	const viewTop = viewport ? viewport.offsetTop : 0;
+	const viewBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+	const margin = 6;
+	const spaceAbove = rect.top - viewTop - margin;
+	const spaceBelow = viewBottom - rect.bottom - margin;
+	// On phones the keyboard covers the area below the field, so prefer the
+	// space above it; with a mouse, open below as usual unless it would clip.
+	const openAbove = isCoarsePointer()
+		? (spaceAbove >= PLAYER_SUGGESTION_MIN_HEIGHT || spaceAbove > spaceBelow)
+		: (spaceBelow < PLAYER_SUGGESTION_MIN_HEIGHT && spaceAbove > spaceBelow);
+	const available = Math.max(
+		0,
+		Math.min(PLAYER_SUGGESTION_MAX_HEIGHT, openAbove ? spaceAbove : spaceBelow)
+	);
+	// No usable room beside the field (e.g. the keyboard fills the screen):
+	// stay out of the way rather than drawing over the input or keyboard.
+	if (available < 48) {
+		hidePlayerSuggestions();
+		return;
+	}
+
+	const width = Math.round(Math.min(Math.max(rect.width, 160), window.innerWidth - 16));
+	const left = Math.min(
+		Math.max(rect.left + window.scrollX, window.scrollX + 8),
+		window.scrollX + window.innerWidth - width - 8
+	);
+
+	list.style.maxHeight = `${Math.round(available)}px`;
+	list.style.width = `${width}px`;
+	list.style.left = `${Math.round(left)}px`;
+
+	// Measure the rendered height so the list never covers the input.
+	const height = Math.min(list.offsetHeight, available);
+	const top = openAbove ? rect.top - height - margin : rect.bottom + margin;
+	list.style.top = `${Math.round(top + window.scrollY)}px`;
+}
+
+function hidePlayerSuggestions() {
+	if (suggestionInput) {
+		suggestionInput.setAttribute('aria-expanded', 'false');
+		suggestionInput.removeAttribute('aria-activedescendant');
+	}
+	suggestionInput = null;
+	suggestionActiveIndex = -1;
+	suggestionTouch = null;
+	if (suggestionList) {
+		suggestionList.hidden = true;
+		suggestionList.textContent = '';
 	}
 }
 
-/** Names ever saved for a team, across the whole draw, de-duped and sorted. */
-function collectTeamPlayers(team) {
-	if (!team || !Array.isArray(state.draw)) {
+function choosePlayerSuggestion(value) {
+	const input = suggestionInput;
+	if (!input) {
+		return;
+	}
+	input.value = value;
+	hidePlayerSuggestions();
+	// Setting .value does not fire "input"; emulate it so the sheet
+	// re-validates and the draft autosave records the chosen name.
+	input.dispatchEvent(new Event('input', { bubbles: true }));
+	input.focus();
+}
+
+function onPlayerSuggestionKeydown(event) {
+	if (!suggestionList || suggestionList.hidden || suggestionInput !== event.currentTarget) {
+		return;
+	}
+	const options = suggestionList.querySelectorAll('.player-suggestions__option');
+	if (!options.length) {
+		return;
+	}
+	if (event.key === 'ArrowDown') {
+		event.preventDefault();
+		suggestionActiveIndex = (suggestionActiveIndex + 1) % options.length;
+		markActiveSuggestion(options);
+	} else if (event.key === 'ArrowUp') {
+		event.preventDefault();
+		suggestionActiveIndex = suggestionActiveIndex <= 0
+			? options.length - 1
+			: suggestionActiveIndex - 1;
+		markActiveSuggestion(options);
+	} else if (event.key === 'Enter' && suggestionActiveIndex >= 0) {
+		event.preventDefault();
+		choosePlayerSuggestion(options[suggestionActiveIndex].dataset.value);
+	} else if (event.key === 'Escape') {
+		event.preventDefault();
+		hidePlayerSuggestions();
+	}
+}
+
+function markActiveSuggestion(options) {
+	options.forEach((optionEl, index) => {
+		const active = index === suggestionActiveIndex;
+		optionEl.classList.toggle('is-active', active);
+		optionEl.setAttribute('aria-selected', active ? 'true' : 'false');
+		if (active && suggestionInput) {
+			suggestionInput.setAttribute('aria-activedescendant', optionEl.id);
+		}
+	});
+}
+
+/** Keep an open list aligned when the page or the visual viewport scrolls. */
+function repositionOpenSuggestions(event) {
+	if (event && event.target === suggestionList) {
+		return;
+	}
+	if (suggestionList && !suggestionList.hidden && suggestionInput) {
+		positionSuggestionList(suggestionInput);
+	}
+}
+
+/**
+ * Names ever saved for a team in one competition, de-duped and sorted. Scoped to
+ * the competition so same-named teams from other competitions cannot leak names.
+ */
+function collectTeamPlayers(competition, team) {
+	if (!team || !competition || !Array.isArray(competition.rounds)) {
 		return [];
 	}
 	const seen = new Map(); // lowercase -> first spelling seen
-	for (const competition of state.draw) {
-		for (const round of competition.rounds || []) {
-			for (const game of round.games || []) {
-				let names = null;
-				if (game.homeTeam === team) {
-					names = game.homePlayers;
-				} else if (game.awayTeam === team) {
-					names = game.awayPlayers;
-				}
-				if (!Array.isArray(names)) {
-					continue;
-				}
-				for (const raw of names) {
-					const name = String(raw == null ? '' : raw).trim();
-					if (name && !seen.has(name.toLowerCase())) {
-						seen.set(name.toLowerCase(), name);
-					}
+	for (const round of competition.rounds) {
+		for (const game of round.games || []) {
+			let names = null;
+			if (game.homeTeam === team) {
+				names = game.homePlayers;
+			} else if (game.awayTeam === team) {
+				names = game.awayPlayers;
+			}
+			if (!Array.isArray(names)) {
+				continue;
+			}
+			for (const raw of names) {
+				const name = String(raw == null ? '' : raw).trim();
+				if (name && !seen.has(name.toLowerCase())) {
+					seen.set(name.toLowerCase(), name);
 				}
 			}
 		}
@@ -877,7 +1172,7 @@ async function onSave() {
 		state.loadedGame = deepCopy(game);
 		state.baseline = sheetSnapshot();
 		removeDraft(draftKey());
-		refreshDatalists(game.homeTeam, game.awayTeam);
+		refreshPlayerSuggestions(game.homeTeam, game.awayTeam);
 		clearNotice();
 		// Confirm via the button itself; it stays "Saved" until the sheet is edited.
 		setStatus('', '');
